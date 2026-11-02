@@ -35,10 +35,8 @@ lerna-debug.log*
 !.vscode/extensions.json
 
 # env
-.env
-.env.test
-.env.production
-.env.local
+.env*
+!.env.example
 
 # SIREP: Escaneos reales de clientes (Regla de oro: nunca se suben al repositorio)
 muestras/
