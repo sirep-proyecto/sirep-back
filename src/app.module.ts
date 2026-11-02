@@ -1,0 +1,20 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
+import { TelegramModule } from './telegram/telegram.module';
+import { EscaneosModule } from './escaneos/escaneos.module';
+import { HealthController } from './health/health.controller';
+import { AppController } from './app.controller';
+import { CommonModule } from './common/common.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    ScheduleModule.forRoot(),
+    CommonModule,
+    EscaneosModule,
+    TelegramModule,
+  ],
+  controllers: [AppController, HealthController],
+})
+export class AppModule {}
