@@ -11,21 +11,33 @@ export interface GeminiConfig {
   apiKey: string;
   modelo?: string;
   fetchFn?: typeof fetch;
+  /** Intentos totales ante fallos transitorios del proveedor (por defecto 3). */
+  intentosMaximos?: number;
+  /** Espera antes del 2.º intento; se duplica en cada reintento (por defecto 2000 ms). */
+  esperaBaseMs?: number;
 }
+
+// Sobrecarga o límite de tasa del lado de Google: suelen resolverse en segundos.
+// Un 400/401/403/404 (clave o modelo mal puestos) NO se reintenta porque fallaría igual.
+const ESTADOS_REINTENTABLES = new Set([429, 500, 502, 503, 504]);
 
 export class GeminiLector implements LectorDeReportes {
   readonly nombre = 'gemini';
   readonly modelo: string;
   private readonly apiKey: string;
   private readonly fetchFn: typeof fetch;
+  private readonly intentosMaximos: number;
+  private readonly esperaBaseMs: number;
 
   constructor(config: GeminiConfig) {
     if (!config.apiKey) {
       throw new ProveedorIaError('gemini', 'GEMINI_API_KEY no configurada');
     }
     this.apiKey = config.apiKey;
-    this.modelo = config.modelo || 'gemini-2.5-flash';
+    this.modelo = config.modelo || 'gemini-3.8-flash';
     this.fetchFn = config.fetchFn || globalThis.fetch.bind(globalThis);
+    this.intentosMaximos = Math.max(1, config.intentosMaximos ?? 3);
+    this.esperaBaseMs = config.esperaBaseMs ?? 2000;
   }
 
   async leer(
@@ -66,21 +78,7 @@ export class GeminiLector implements LectorDeReportes {
       },
     };
 
-    let res: Response;
-    try {
-      res = await this.fetchFn(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-    } catch (err: any) {
-      throw new ProveedorIaError('gemini', `Error de conexión: ${err?.message ?? err}`);
-    }
-
-    if (!res.ok) {
-      const errorBody = await res.text().catch(() => '');
-      throw new ProveedorIaError('gemini', `HTTP ${res.status}: ${errorBody}`, res.status);
-    }
+    const res = await this.enviarConReintentos(url, payload);
 
     const json = await res.json();
     const latenciaMs = Date.now() - inicio;
@@ -116,6 +114,45 @@ export class GeminiLector implements LectorDeReportes {
       },
       salidaCruda: rawText,
     };
+  }
+
+  /**
+   * Envía la petición y reintenta con espera creciente ante errores transitorios
+   * (503 "high demand", 429, 5xx o caída de red). Al agotar los intentos lanza el último error.
+   */
+  private async enviarConReintentos(url: string, payload: unknown): Promise<Response> {
+    let ultimoError: ProveedorIaError | null = null;
+
+    for (let intento = 1; intento <= this.intentosMaximos; intento++) {
+      let res: Response | undefined;
+      try {
+        res = await this.fetchFn(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (err: any) {
+        ultimoError = new ProveedorIaError('gemini', `Error de conexión: ${err?.message ?? err}`);
+      }
+
+      if (res) {
+        if (res.ok) return res;
+        const errorBody = await res.text().catch(() => '');
+        ultimoError = new ProveedorIaError('gemini', `HTTP ${res.status}: ${errorBody}`, res.status);
+        if (!ESTADOS_REINTENTABLES.has(res.status)) throw ultimoError;
+      }
+
+      if (intento < this.intentosMaximos && this.esperaBaseMs > 0) {
+        const espera = this.esperaBaseMs * 2 ** (intento - 1);
+        // Sin esto un 503 se ve igual con o sin reintentos y no hay forma de saber si están funcionando
+        console.warn(
+          `[gemini] intento ${intento}/${this.intentosMaximos} falló (${ultimoError?.codigoHttp ?? 'sin respuesta'}); reintentando en ${espera} ms`,
+        );
+        await new Promise((r) => setTimeout(r, espera));
+      }
+    }
+
+    throw ultimoError as ProveedorIaError;
   }
 
   private normalizarCampos(

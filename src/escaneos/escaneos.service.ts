@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   Injectable,
@@ -7,17 +8,20 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase.service';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
-import {
-  CampoEsperado,
-  LectorDeReportes,
-  ResultadoLectura,
-} from '../ia-extractor/types';
+import { CampoEsperado, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import {
   calcularHuellaSHA256,
+  esPDF,
   extraerNumeroReporte,
+  fusionarLecturas,
+  normalizarFecha,
   optimizarParaIA,
-  procesarPaginasPDF,
+  renderizarPaginasPDF,
+  validarImagen,
 } from './escaneos.util';
+
+const BUCKET = 'escaneos-originales';
+const EMPRESA_POR_DEFECTO = '00000000-0000-0000-0000-000000000000';
 
 export class EscaneoDuplicadoError extends ConflictException {
   constructor(
@@ -26,6 +30,17 @@ export class EscaneoDuplicadoError extends ConflictException {
     public readonly datosExtra?: Record<string, any>,
   ) {
     super(mensaje);
+  }
+}
+
+/**
+ * Falla del proveedor de IA (sin clave, sin respuesta, error HTTP, JSON inválido).
+ * El detalle técnico va al log; el mensaje que ve la secretaria en Telegram es genérico
+ * porque los errores de los proveedores son largos y no le sirven.
+ */
+export class LecturaIAError extends BadGatewayException {
+  constructor(public readonly detalle: string) {
+    super('No se pudo leer el reporte con la IA.');
   }
 }
 
@@ -97,206 +112,241 @@ export class EscaneosService {
     this.lectorIA = lector;
   }
 
+  /** Borra de Storage lo ya subido cuando el procesamiento falla, para no dejar archivos huérfanos. */
+  private async limpiarStorage(rutas: string[]) {
+    if (rutas.length === 0) return;
+    try {
+      const { error } = await this.client.storage.from(BUCKET).remove(rutas);
+      if (error) this.logger.warn(`No se pudo limpiar Storage tras un fallo: ${error.message}`);
+    } catch (err: any) {
+      this.logger.warn(`No se pudo limpiar Storage tras un fallo: ${err?.message}`);
+    }
+  }
+
   async procesarEscaneo(input: ProcesarEscaneoInput): Promise<ResultadoProcesamientoEscaneo> {
-    const { buffer, filename, caption, mimetype = 'application/pdf', enviadoPor, telegramChatId } = input;
-    const empresaId = input.empresaId || '00000000-0000-0000-0000-000000000000';
+    const { buffer, filename, caption, enviadoPor, telegramChatId } = input;
+    const empresaId = input.empresaId || EMPRESA_POR_DEFECTO;
 
     if (!buffer || buffer.length === 0) {
       throw new BadRequestException('El archivo enviado está vacío.');
     }
 
-    // 1. Huella SHA-256 del archivo escaneado original
+    // 1. Huella SHA-256 y duplicado nivel 1 (mismo archivo reenviado)
     const huella = calcularHuellaSHA256(buffer);
-
-    // 2. Control de duplicados Nivel 1: Huella de archivo
     const { data: escaneoPorHuella } = await this.client
       .from('escaneos')
       .select('id, numero_reporte')
+      .eq('empresa_id', empresaId)
       .eq('huella', huella)
       .maybeSingle();
 
     if (escaneoPorHuella) {
-      throw new EscaneoDuplicadoError(
-        'archivo_duplicado',
-        'Este archivo ya fue enviado anteriormente.',
-        { escaneoId: escaneoPorHuella.id, numeroReporte: escaneoPorHuella.numero_reporte },
-      );
+      throw new EscaneoDuplicadoError('archivo_duplicado', 'Este archivo ya fue enviado anteriormente.', {
+        escaneoId: escaneoPorHuella.id,
+        numeroReporte: escaneoPorHuella.numero_reporte,
+      });
     }
 
-    // 3. Obtener número de reporte preliminar (del texto de Telegram o nombre de archivo)
+    // 2. N° preliminar (texto del envío o nombre del archivo) y duplicado nivel 2 (mismo papel escaneado dos veces)
     let numeroReporte = extraerNumeroReporte(caption) || extraerNumeroReporte(filename);
-
-    // 4. Control de duplicados Nivel 2: N° de reporte impreso en talonario
     if (numeroReporte) {
-      const { data: escaneoPorNumero } = await this.client
-        .from('escaneos')
-        .select('id, numero_reporte')
-        .eq('empresa_id', empresaId)
-        .eq('numero_reporte', numeroReporte)
-        .maybeSingle();
+      await this.verificarNumeroNoRegistrado(empresaId, numeroReporte);
+    }
 
-      if (escaneoPorNumero) {
-        throw new EscaneoDuplicadoError(
-          'reporte_duplicado',
-          `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
-          { numeroReporte },
-        );
+    // 3. Lector de IA listo antes de guardar nada: si falta la clave no se sube basura a Storage
+    const lector = this.obtenerLector();
+
+    // 4. Una imagen por página. Se hace antes de subir para rechazar PDF dañados o demasiado largos sin dejar rastro.
+    const esPdf = esPDF(buffer);
+    let imagenesPaginas: Buffer[];
+    let extensionOriginal = 'pdf';
+    let mimetypeOriginal = 'application/pdf';
+
+    if (esPdf) {
+      imagenesPaginas = await renderizarPaginasPDF(buffer);
+    } else {
+      const formato = await validarImagen(buffer);
+      extensionOriginal = formato.extension;
+      mimetypeOriginal = formato.mimetype;
+      imagenesPaginas = [buffer];
+    }
+    const totalPaginas = imagenesPaginas.length;
+
+    // 5. Guardar el original sin comprimir y las imágenes de cada página
+    const base = `${empresaId}/${Date.now()}_${numeroReporte || 'sin_num'}`;
+    const rutaOriginal = `${base}_orig.${extensionOriginal}`;
+    const subidos: string[] = [];
+
+    await this.subirArchivo(rutaOriginal, buffer, mimetypeOriginal);
+    subidos.push(rutaOriginal);
+
+    // Una foto ya ES su única página: no se duplica en Storage
+    const rutasPaginas: string[] = [];
+    try {
+      for (let i = 0; i < imagenesPaginas.length; i++) {
+        if (!esPdf) {
+          rutasPaginas.push(rutaOriginal);
+          continue;
+        }
+        const ruta = `${base}_pag_${i + 1}.png`;
+        await this.subirArchivo(ruta, imagenesPaginas[i], 'image/png');
+        subidos.push(ruta);
+        rutasPaginas.push(ruta);
       }
+    } catch (err) {
+      await this.limpiarStorage(subidos);
+      throw err;
     }
 
-    // 5. Procesar páginas si es PDF (Guía pág. 10: "Un PDF de dos páginas queda guardado con su original y sus páginas")
-    let totalPaginas = 1;
-    let paginasBuffers: Buffer[] = [buffer];
-    if (mimetype === 'application/pdf' || filename?.toLowerCase().endsWith('.pdf')) {
-      const infoPdf = await procesarPaginasPDF(buffer);
-      totalPaginas = infoPdf.totalPaginas;
-      paginasBuffers = infoPdf.paginas;
+    try {
+      // 6. Lectura con el modelo, página por página, y fusión de resultados
+      const lecturas: ResultadoLectura[] = [];
+      for (const pagina of imagenesPaginas) {
+        const copiaIA = await optimizarParaIA(pagina);
+        try {
+          lecturas.push(await lector.leer(copiaIA.buffer, copiaIA.mimetype, this.camposFormulario));
+        } catch (err: any) {
+          this.logger.error(`Error en la extracción con IA: ${err?.message}`);
+          throw new LecturaIAError(err?.message ?? 'error desconocido');
+        }
+      }
+      const lectura = fusionarLecturas(lecturas);
+
+      // 7. Si el N° no vino en el envío, se usa el que leyó el modelo y se revisa duplicado de nuevo
+      if (!numeroReporte && lectura.numeroReporte) {
+        numeroReporte = extraerNumeroReporte(lectura.numeroReporte);
+        if (numeroReporte) {
+          await this.verificarNumeroNoRegistrado(empresaId, numeroReporte);
+        }
+      }
+
+      // 8. Campos dudosos o no leídos = lo que irá a la bandeja de revisión
+      const camposDudosos: string[] = [];
+      const camposMapa: Record<string, any> = {};
+      for (const campo of lectura.campos) {
+        camposMapa[campo.clave] = campo;
+        if (campo.dudoso || campo.confianza === 'baja' || campo.noLeido) {
+          camposDudosos.push(campo.clave);
+        }
+      }
+      const estado: 'procesado' | 'en_revision' = camposDudosos.length > 0 ? 'en_revision' : 'procesado';
+
+      // 9. Persistir escaneo
+      const { data: escaneoInsertado, error: errorEscaneo } = await this.client
+        .from('escaneos')
+        .insert({
+          empresa_id: empresaId,
+          numero_reporte: numeroReporte || null,
+          ruta_original: rutaOriginal,
+          huella,
+          paginas: totalPaginas,
+          enviado_por: enviadoPor || 'telegram',
+          telegram_chat_id: telegramChatId || null,
+          estado,
+          metadatos: {
+            rutas_paginas: rutasPaginas,
+            uso: lectura.uso,
+            salida_cruda: lectura.salidaCruda,
+            filename,
+          },
+        })
+        .select('id')
+        .single();
+
+      if (errorEscaneo || !escaneoInsertado) {
+        // 23505 = índice único: otro envío igual terminó justo antes (carrera entre dos mensajes)
+        if ((errorEscaneo as any)?.code === '23505') {
+          const porHuella = String(errorEscaneo?.message).includes('huella');
+          throw porHuella
+            ? new EscaneoDuplicadoError('archivo_duplicado', 'Este archivo ya fue enviado anteriormente.')
+            : new EscaneoDuplicadoError(
+              'reporte_duplicado',
+              `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
+              { numeroReporte },
+            );
+        }
+        const msg = errorEscaneo?.message || 'No se obtuvo el ID del registro creado';
+        this.logger.error(`Error persistiendo escaneo en base de datos: ${msg}`);
+        throw new InternalServerErrorException(`Error al registrar el escaneo: ${msg}`);
+      }
+
+      const escaneoId = escaneoInsertado.id;
+
+      // 10. Persistir reporte (origen histórico, vinculado a su escaneo)
+      const { error: errorReporte } = await this.client.from('reportes').insert({
+        empresa_id: empresaId,
+        escaneo_id: escaneoId,
+        numero_talonario: numeroReporte || null,
+        origen: 'historico',
+        cliente: camposMapa.empresa?.valor || null,
+        fecha: normalizarFecha(camposMapa.fecha?.valor),
+        serie_equipo: camposMapa.equipo?.valor || null,
+        procedimiento: camposMapa.procedimiento?.valor || null,
+        codigo_repuesto: camposMapa.codigo_repuesto?.valor || null,
+        tecnico_asignado: camposMapa.tecnico?.valor || null,
+        estado_reporte: estado === 'en_revision' ? 'pendiente_revision' : 'aprobado',
+        campos_extraidos: camposMapa,
+        campos_dudosos: camposDudosos,
+      });
+
+      if (errorReporte) {
+        // Sin esto el escaneo quedaba guardado sin reporte y reenviarlo se rechazaba como "duplicado"
+        await this.client.from('escaneos').delete().eq('id', escaneoId);
+        this.logger.error(`Error persistiendo reporte técnico: ${errorReporte.message}`);
+        throw new InternalServerErrorException(`Error al registrar reporte técnico: ${errorReporte.message}`);
+      }
+
+      return {
+        escaneoId,
+        numeroReporte: numeroReporte || 'Sin N° detectado',
+        estado,
+        campos: camposMapa,
+        camposDudosos,
+        totalPaginas,
+        huella,
+        rutasPaginas,
+        metricasIA: lectura.uso,
+      };
+    } catch (err) {
+      await this.limpiarStorage(subidos);
+      throw err;
     }
+  }
 
-    // 6. Guardar archivo original intacto sin comprimir en Storage
-    const timestamp = Date.now();
-    const ext = filename?.includes('.') ? filename.split('.').pop() : 'pdf';
-    const rutaOriginal = `${empresaId}/${timestamp}_${numeroReporte || 'sin_num'}_orig.${ext}`;
+  private obtenerLector(): LectorDeReportes {
+    if (this.lectorIA) return this.lectorIA;
+    try {
+      this.lectorIA = crearLectorDeReportes();
+      return this.lectorIA;
+    } catch (err: any) {
+      this.logger.error(`Proveedor de IA no disponible: ${err?.message}`);
+      throw new LecturaIAError(err?.message ?? 'proveedor no configurado');
+    }
+  }
 
-    const { error: errorStorageOriginal } = await this.client.storage
-      .from('escaneos-originales')
-      .upload(rutaOriginal, buffer, { contentType: mimetype, upsert: false });
+  private async verificarNumeroNoRegistrado(empresaId: string, numeroReporte: string) {
+    const { data } = await this.client
+      .from('escaneos')
+      .select('id, numero_reporte')
+      .eq('empresa_id', empresaId)
+      .eq('numero_reporte', numeroReporte)
+      .maybeSingle();
 
-    if (errorStorageOriginal) {
-      this.logger.error(`Error guardando archivo original en Storage: ${errorStorageOriginal.message}`);
-      throw new InternalServerErrorException(
-        `No se pudo almacenar el archivo original en Storage: ${errorStorageOriginal.message}`,
+    if (data) {
+      throw new EscaneoDuplicadoError(
+        'reporte_duplicado',
+        `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
+        { numeroReporte },
       );
     }
+  }
 
-    // Guardar las páginas individuales
-    const rutasPaginas: string[] = [];
-    for (let p = 0; p < paginasBuffers.length; p++) {
-      const rutaPag = `${empresaId}/${timestamp}_${numeroReporte || 'sin_num'}_pag_${p + 1}.${ext}`;
-      rutasPaginas.push(rutaPag);
-      const { error: errorStoragePagina } = await this.client.storage
-        .from('escaneos-originales')
-        .upload(rutaPag, paginasBuffers[p], { contentType: mimetype, upsert: false });
-
-      if (errorStoragePagina) {
-        this.logger.warn(`Advertencia al guardar página ${p + 1} en Storage: ${errorStoragePagina.message}`);
-      }
+  private async subirArchivo(ruta: string, contenido: Buffer, contentType: string) {
+    const { error } = await this.client.storage.from(BUCKET).upload(ruta, contenido, { contentType, upsert: false });
+    if (error) {
+      this.logger.error(`Error guardando ${ruta} en Storage: ${error.message}`);
+      throw new InternalServerErrorException(`No se pudo almacenar el archivo en Storage: ${error.message}`);
     }
-
-    // 7. Preparar copia comprimida para el modelo de IA
-    const { buffer: bufferIA, mimetype: mimetypeIA } = await optimizarParaIA(buffer, mimetype);
-
-    // 8. Lectura de campos con el modelo multimodal
-    if (!this.lectorIA) {
-      this.lectorIA = crearLectorDeReportes();
-    }
-
-    let resultadoLectura: ResultadoLectura;
-    try {
-      resultadoLectura = await this.lectorIA.leer(bufferIA, mimetypeIA, this.camposFormulario);
-    } catch (err: any) {
-      this.logger.error(`Error en la extracción con IA: ${err?.message}`);
-      throw new BadRequestException(`Fallo en la lectura del modelo: ${err?.message}`);
-    }
-
-    // Si no teníamos número de reporte previo, usar el leído por el modelo si está disponible
-    if (!numeroReporte && resultadoLectura.numeroReporte) {
-      numeroReporte = resultadoLectura.numeroReporte;
-
-      // Re-verificar duplicado con el número extraído por el modelo
-      const { data: duplicadoIA } = await this.client
-        .from('escaneos')
-        .select('id')
-        .eq('empresa_id', empresaId)
-        .eq('numero_reporte', numeroReporte)
-        .maybeSingle();
-
-      if (duplicadoIA) {
-        throw new EscaneoDuplicadoError(
-          'reporte_duplicado',
-          `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
-          { numeroReporte },
-        );
-      }
-    }
-
-    // 9. Identificar campos dudosos o no leídos para la bandeja de revisión
-    const camposDudosos: string[] = [];
-    const camposMapa: Record<string, any> = {};
-
-    for (const campo of resultadoLectura.campos) {
-      camposMapa[campo.clave] = campo;
-      if (campo.dudoso || campo.confianza === 'baja' || campo.noLeido) {
-        camposDudosos.push(campo.clave);
-      }
-    }
-
-    const estado: 'recibido' | 'procesado' | 'en_revision' =
-      camposDudosos.length > 0 ? 'en_revision' : 'procesado';
-
-    // 10. Persistir en tabla `escaneos`
-    const { data: escaneoInsertado, error: errorEscaneo } = await this.client
-      .from('escaneos')
-      .insert({
-        empresa_id: empresaId,
-        numero_reporte: numeroReporte || null,
-        ruta_original: rutaOriginal,
-        huella,
-        paginas: totalPaginas,
-        enviado_por: enviadoPor || 'telegram',
-        telegram_chat_id: telegramChatId || null,
-        estado,
-        metadatos: {
-          rutas_paginas: rutasPaginas,
-          uso: resultadoLectura.uso,
-          salida_cruda: resultadoLectura.salidaCruda,
-          filename,
-        },
-      })
-      .select('id')
-      .single();
-
-    if (errorEscaneo || !escaneoInsertado) {
-      const msg = errorEscaneo?.message || 'No se obtuvo el ID del registro creado';
-      this.logger.error(`Error persistiendo escaneo en base de datos: ${msg}`);
-      throw new InternalServerErrorException(`Error al registrar el escaneo: ${msg}`);
-    }
-
-    const escaneoId = escaneoInsertado.id;
-
-    // 11. Persistir en tabla `reportes` (integrada con RP-TECH como histórico)
-    const { error: errorReporte } = await this.client.from('reportes').insert({
-      empresa_id: empresaId,
-      escaneo_id: escaneoId,
-      numero_talonario: numeroReporte || null,
-      origen: 'historico',
-      cliente: camposMapa.empresa?.valor || null,
-      fecha: camposMapa.fecha?.valor || null,
-      serie_equipo: camposMapa.equipo?.valor || null,
-      procedimiento: camposMapa.procedimiento?.valor || null,
-      codigo_repuesto: camposMapa.codigo_repuesto?.valor || null,
-      tecnico_asignado: camposMapa.tecnico?.valor || null,
-      estado_reporte: estado === 'en_revision' ? 'pendiente_revision' : 'aprobado',
-      campos_extraidos: camposMapa,
-      campos_dudosos: camposDudosos,
-    });
-
-    if (errorReporte) {
-      this.logger.error(`Error persistiendo reporte técnico: ${errorReporte.message}`);
-      throw new InternalServerErrorException(`Error al registrar reporte técnico: ${errorReporte.message}`);
-    }
-
-    return {
-      escaneoId,
-      numeroReporte: numeroReporte || 'Sin N° detectado',
-      estado,
-      campos: camposMapa,
-      camposDudosos,
-      totalPaginas,
-      huella,
-      rutasPaginas,
-      metricasIA: resultadoLectura.uso,
-    };
   }
 
   async listarEscaneos(limite = 50) {

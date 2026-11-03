@@ -7,13 +7,14 @@ import {
   UseInterceptors,
   Body,
   Query,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { EscaneosService } from './escaneos.service';
 
 @Controller('escaneos')
 export class EscaneosController {
-  constructor(private readonly escaneosService: EscaneosService) {}
+  constructor(private readonly escaneosService: EscaneosService) { }
 
   @Get()
   async listar(@Query('limite') limite?: string) {
@@ -33,6 +34,9 @@ export class EscaneosController {
     @Body('numeroReporte') numeroReporte?: string,
     @Body('enviadoPor') enviadoPor?: string,
   ) {
+    if (!file) {
+      throw new BadRequestException("Falta el archivo (campo 'file' en multipart/form-data).");
+    }
     return this.escaneosService.procesarEscaneo({
       buffer: file.buffer,
       filename: file.originalname,
@@ -42,4 +46,3 @@ export class EscaneosController {
     });
   }
 }
-

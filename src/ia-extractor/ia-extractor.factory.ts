@@ -8,6 +8,14 @@ export interface FactoryOptions {
   openaiConfig?: Partial<OpenAIConfig>;
 }
 
+/** Lee un entero positivo de una variable de entorno; si no existe o es inválido devuelve undefined. */
+function enteroDeEnv(nombre: string): number | undefined {
+  const n = Number(process.env[nombre]);
+  return Number.isFinite(n) && n >= 0 && process.env[nombre] !== undefined && process.env[nombre] !== ''
+    ? Math.floor(n)
+    : undefined;
+}
+
 export function crearLectorDeReportes(opciones?: FactoryOptions): LectorDeReportes {
   const proveedor = (
     opciones?.proveedor ||
@@ -25,6 +33,8 @@ export function crearLectorDeReportes(opciones?: FactoryOptions): LectorDeReport
       apiKey,
       modelo,
       fetchFn: opciones?.geminiConfig?.fetchFn,
+      intentosMaximos: opciones?.geminiConfig?.intentosMaximos ?? enteroDeEnv('GEMINI_REINTENTOS'),
+      esperaBaseMs: opciones?.geminiConfig?.esperaBaseMs ?? enteroDeEnv('GEMINI_ESPERA_MS'),
     });
   }
 

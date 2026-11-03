@@ -1,18 +1,32 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { EscaneosService, EscaneoDuplicadoError } from '../escaneos/escaneos.service';
+import {
+  EscaneosService,
+  EscaneoDuplicadoError,
+  LecturaIAError,
+  ResultadoProcesamientoEscaneo,
+} from '../escaneos/escaneos.service';
 
 export interface TelegramUpdate {
   message?: {
     chat: { id: number | string };
     message_id: number;
     from?: { first_name?: string; username?: string };
-    document?: { file_id: string; file_name?: string; mime_type?: string };
+    document?: { file_id: string; file_name?: string; mime_type?: string; file_size?: number };
     photo?: Array<{ file_id: string }>;
     caption?: string;
     text?: string;
   };
 }
+
+/** Los valores vienen de letra manuscrita leída por IA: un "<" suelto rompe el parse_mode HTML y Telegram descarta el mensaje. */
+export function escaparHtml(texto: string): string {
+  return texto.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// getFile de la Bot API solo entrega archivos de hasta 20 MB
+const LIMITE_DESCARGA_BYTES = 20 * 1024 * 1024;
+const LIMITE_MENSAJE = 4000;
 
 @Injectable()
 export class TelegramService {
@@ -44,39 +58,48 @@ export class TelegramService {
     // 1. Verificar si viene un archivo o foto
     const fileId =
       message.document?.file_id ||
-      (message.photo && message.photo.length > 0
-        ? message.photo[message.photo.length - 1].file_id
-        : null);
+      (message.photo && message.photo.length > 0 ? message.photo[message.photo.length - 1].file_id : null);
 
     if (!fileId) {
       if (message.text?.startsWith('/start') || message.text?.startsWith('/help')) {
         await this.enviarMensaje(
           chatId,
           `👋 <b>Bienvenido al Bot de SIREP</b>\n\n` +
-            `Por favor, envía el reporte técnico escaneado (en formato <b>PDF</b> o <b>Foto</b> a 300 dpi).\n` +
-            `Puedes incluir el N° de reporte en el mensaje o en el nombre del archivo (ej: <code>000845.pdf</code>).`,
+          `Envía el reporte técnico escaneado en <b>PDF</b> (anverso y reverso en un solo archivo) o en <b>foto</b>, a 300 dpi.\n` +
+          `Puedes poner el N° de reporte en el mensaje o en el nombre del archivo (ej: <code>000845.pdf</code>).`,
         );
         return;
       }
 
-      await this.enviarMensaje(
-        chatId,
-        `📄 Por favor envía el escaneo del reporte técnico (PDF o foto) para procesarlo.`,
-      );
+      await this.enviarMensaje(chatId, `📄 Por favor envía el escaneo del reporte técnico (PDF o foto) para procesarlo.`);
       return;
     }
 
     const filename = message.document?.file_name || `escaneo_${Date.now()}.jpg`;
-    const mimetype = message.document?.mime_type || (filename.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
+    const mimetype = message.document?.mime_type || (filename.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
     const caption = message.caption || message.text;
+
+    // Se rechaza antes de descargar: Word, Excel, etc. no son reportes escaneados
+    if (message.document && mimetype !== 'application/pdf' && !mimetype.startsWith('image/')) {
+      await this.enviarMensaje(chatId, `⚠️ Solo puedo procesar <b>PDF</b> o <b>imágenes</b> (JPG, PNG). Recibí un archivo de tipo <code>${escaparHtml(mimetype)}</code>.`);
+      return;
+    }
+
+    if ((message.document?.file_size ?? 0) > LIMITE_DESCARGA_BYTES) {
+      await this.enviarMensaje(
+        chatId,
+        `⚠️ El archivo pesa más de 20 MB y Telegram no me permite descargarlo. Vuelve a escanear a menor tamaño (por ejemplo 200 dpi) o envía solo el reporte sin otras hojas.`,
+      );
+      return;
+    }
 
     await this.enviarMensaje(chatId, `⏳ <i>Procesando reporte con IA, por favor espera un momento...</i>`);
 
     try {
-      // 2. Descargar buffer de Telegram
+      // 2. Descargar el archivo de Telegram
       const buffer = await this.descargarArchivo(fileId);
 
-      // 3. Procesar escaneo con el servicio de negocio
+      // 3. Huella + N° + guardado + IA (ver EscaneosService)
       const resultado = await this.escaneosService.procesarEscaneo({
         buffer,
         filename,
@@ -86,44 +109,75 @@ export class TelegramService {
         telegramChatId: Number(chatId),
       });
 
-      // 4. Formatear respuesta de éxito
-      let mensajeRespuesta = `✅ <b>Reporte N° ${resultado.numeroReporte} registrado</b>\n\n`;
-      mensajeRespuesta += `<b>Cliente:</b> ${resultado.campos.cliente?.valor || '<i>[No detectado]</i>'}\n`;
-      mensajeRespuesta += `<b>Fecha:</b> ${resultado.campos.fecha?.valor || '<i>[No detectada]</i>'}\n`;
-      mensajeRespuesta += `<b>Serie:</b> ${resultado.campos.serie_equipo?.valor || '<i>[No detectada]</i>'}\n`;
-      mensajeRespuesta += `<b>Procedimiento:</b> ${resultado.campos.procedimiento?.valor || '<i>[No detectado]</i>'}\n`;
-      mensajeRespuesta += `<b>Código Repuesto:</b> ${resultado.campos.codigo_repuesto?.valor || '<i>[No detectado]</i>'}\n\n`;
-
-      if (resultado.estado === 'en_revision') {
-        mensajeRespuesta += `⚠️ <b>Atención:</b> Pasó a <b>Bandeja de Revisión</b> debido a campos dudosos o ilegibles: ` +
-          `<code>${resultado.camposDudosos.join(', ')}</code>.`;
-      } else {
-        mensajeRespuesta += `✨ Todos los campos se leyeron con alta confianza.`;
-      }
-
-      await this.enviarMensaje(chatId, mensajeRespuesta);
+      // 4. Responder al chat
+      await this.enviarMensaje(chatId, this.formatearResultado(resultado));
     } catch (err: any) {
-      if (err instanceof EscaneoDuplicadoError) {
-        if (err.tipoDuplicado === 'archivo_duplicado') {
-          await this.enviarMensaje(
-            chatId,
-            `⚠️ <b>Aviso:</b> Este archivo ya fue enviado anteriormente.\n<i>(No se crearon registros duplicados)</i>`,
-          );
-        } else if (err.tipoDuplicado === 'reporte_duplicado') {
-          await this.enviarMensaje(
-            chatId,
-            `⚠️ <b>Aviso:</b> El reporte N° <b>${err.datosExtra?.numeroReporte || ''}</b> ya se encuentra registrado.`,
-          );
-        }
-        return;
-      }
+      await this.responderError(chatId, err);
+    }
+  }
 
-      this.logger.error(`Error procesando reporte en Telegram: ${err?.message ?? err}`);
+  private formatearResultado(resultado: ResultadoProcesamientoEscaneo): string {
+    // Las claves son las de EscaneosService.camposFormulario ('empresa' y 'equipo'; antes se
+    // buscaban 'cliente' y 'serie_equipo', que el modelo nunca devuelve, y siempre salía "No detectado").
+    const dato = (clave: string, maxLargo = 200): string => {
+      const valor = resultado.campos[clave]?.valor;
+      if (valor === null || valor === undefined || valor === '') return '<i>[No detectado]</i>';
+      const texto = typeof valor === 'boolean' ? (valor ? 'Sí' : 'No') : String(valor);
+      const recortado = texto.length > maxLargo ? `${texto.slice(0, maxLargo)}…` : texto;
+      return escaparHtml(recortado);
+    };
+
+    let mensaje = `✅ <b>Reporte N° ${escaparHtml(resultado.numeroReporte)} registrado</b> (${resultado.totalPaginas} pág.)\n\n`;
+    mensaje += `<b>Empresa:</b> ${dato('empresa')}\n`;
+    mensaje += `<b>Fecha:</b> ${dato('fecha')}\n`;
+    mensaje += `<b>Equipo:</b> ${dato('equipo')}\n`;
+    mensaje += `<b>Procedimiento:</b> ${dato('procedimiento')}\n`;
+    mensaje += `<b>Código repuesto:</b> ${dato('codigo_repuesto')}\n\n`;
+
+    if (resultado.estado === 'en_revision') {
+      mensaje +=
+        `⚠️ <b>Atención:</b> pasó a la <b>Bandeja de Revisión</b> por campos dudosos o ilegibles: ` +
+        `<code>${escaparHtml(resultado.camposDudosos.join(', '))}</code>.`;
+    } else {
+      mensaje += `✨ Todos los campos se leyeron con buena confianza.`;
+    }
+    return mensaje;
+  }
+
+  private async responderError(chatId: number | string, err: any) {
+    if (err instanceof EscaneoDuplicadoError) {
+      if (err.tipoDuplicado === 'archivo_duplicado') {
+        await this.enviarMensaje(
+          chatId,
+          `⚠️ <b>Aviso:</b> Este archivo ya fue enviado anteriormente.\n<i>(No se crearon registros duplicados)</i>`,
+        );
+      } else {
+        await this.enviarMensaje(
+          chatId,
+          `⚠️ <b>Aviso:</b> El reporte N° <b>${escaparHtml(String(err.datosExtra?.numeroReporte || ''))}</b> ya se encuentra registrado.`,
+        );
+      }
+      return;
+    }
+
+    this.logger.error(`Error procesando reporte en Telegram: ${err?.message ?? err}`);
+
+    if (err instanceof LecturaIAError) {
       await this.enviarMensaje(
         chatId,
-        `❌ <b>Error al procesar el reporte:</b>\n${err?.message || 'Error desconocido'}. Por favor verifica el archivo y vuelve a intentar.`,
+        `❌ <b>No pude leer el reporte con la IA en este momento.</b>\nNo se guardó nada. Intenta de nuevo en unos minutos; si se repite, avisa al equipo de desarrollo.`,
       );
+      return;
     }
+
+    // Errores 4xx propios del sistema (PDF dañado, demasiadas páginas...) traen un mensaje pensado para la secretaria.
+    // Cualquier otro error es técnico (base de datos, red) y se muestra genérico.
+    const mensajeUsuario =
+      err instanceof HttpException && err.getStatus() < 500
+        ? escaparHtml(String(err.message)).slice(0, 500)
+        : 'Ocurrió un error interno. No se guardó el reporte.';
+
+    await this.enviarMensaje(chatId, `❌ <b>Error al procesar el reporte:</b>\n${mensajeUsuario}\nVerifica el archivo y vuelve a intentar.`);
   }
 
   async descargarArchivo(fileId: string): Promise<Buffer> {
@@ -131,12 +185,12 @@ export class TelegramService {
       throw new Error('TELEGRAM_BOT_TOKEN no configurado');
     }
 
-    const resInfo = await fetch(`${this.apiBase}/getFile?file_id=${fileId}`);
-    if (!resInfo.ok) {
-      throw new Error(`Fallo al consultar getFile en Telegram: HTTP ${resInfo.status}`);
+    const resInfo = await fetch(`${this.apiBase}/getFile?file_id=${encodeURIComponent(fileId)}`);
+    const dataInfo: any = await resInfo.json().catch(() => ({}));
+    if (!resInfo.ok || !dataInfo.ok) {
+      throw new Error(`Fallo al consultar getFile en Telegram: HTTP ${resInfo.status} ${dataInfo.description ?? ''}`.trim());
     }
 
-    const dataInfo = await resInfo.json();
     const filePath = dataInfo.result?.file_path;
     if (!filePath) {
       throw new Error('Telegram no devolvió la ruta del archivo (file_path).');
@@ -147,8 +201,7 @@ export class TelegramService {
       throw new Error(`Fallo al descargar archivo desde Telegram: HTTP ${resArchivo.status}`);
     }
 
-    const arrayBuffer = await resArchivo.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    return Buffer.from(await resArchivo.arrayBuffer());
   }
 
   async enviarMensaje(chatId: number | string, texto: string) {
@@ -158,15 +211,19 @@ export class TelegramService {
     }
 
     try {
-      await fetch(`${this.apiBase}/sendMessage`, {
+      const res = await fetch(`${this.apiBase}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: texto,
+          text: texto.slice(0, LIMITE_MENSAJE),
           parse_mode: 'HTML',
         }),
       });
+      if (!res.ok) {
+        // Antes un 400 (HTML mal formado, chat bloqueado) se ignoraba en silencio y la secretaria nunca recibía respuesta
+        this.logger.error(`Telegram rechazó sendMessage: HTTP ${res.status} ${await res.text().catch(() => '')}`);
+      }
     } catch (err: any) {
       this.logger.error(`Error enviando mensaje a Telegram: ${err?.message}`);
     }

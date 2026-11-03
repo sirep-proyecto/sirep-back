@@ -10,8 +10,9 @@ Sistema para digitalizar reportes de servicio técnico industrial escritos a man
    - **Por Huella SHA-256:** Evita registrar el mismo archivo si fue reenviado.
    - **Por N° de Reporte Impreso:** Evita registrar dos veces el mismo reporte físico aunque se escanee dos veces.
 3. **Almacenamiento del Original:** El escaneo original se guarda **intacto sin comprimir** en Supabase Storage como documento legal de auditoría.
-4. **Extracción Multimodal con IA:** La pieza de IA (Gemini u OpenAI) extrae los campos clave (`cliente`, `fecha`, `serie_equipo`, `procedimiento`, `codigo_repuesto`, `tecnico_asignado`) evaluando confianza (`alta`, `media`, `baja`) y marcando campos ilegibles como `noLeido: true`.
-5. **Bandeja de Revisión:** Si algún campo tiene baja confianza o es dudoso, el reporte queda en estado `en_revision` para que un técnico confirme los datos con el recorte de la imagen al lado.
+4. **Una imagen por página:** Si llega un PDF, cada página se convierte a imagen PNG (`PDF_DPI`, 200 por defecto) y se guarda junto al original. Un PDF debe traer un solo reporte (anverso y reverso, máximo `MAX_PAGINAS_REPORTE`).
+5. **Extracción Multimodal con IA:** La pieza de IA (Gemini u OpenAI) lee cada página como imagen JPEG comprimida (`IA_LADO_LARGO_PX`) y extrae los campos del formulario (`tecnico`, `empresa`, `fecha`, `equipo`, `procedimiento`, `codigo_repuesto`, etc.) con su confianza (`alta`, `media`, `baja`), marcando los ilegibles como `noLeido: true`. Si el modelo falla no se guarda nada y se avisa al chat.
+6. **Bandeja de Revisión:** Si algún campo tiene baja confianza o es dudoso, el reporte queda en estado `en_revision` para que un técnico confirme los datos con el recorte de la imagen al lado.
 
 ---
 
@@ -54,15 +55,7 @@ Para reconstruir la base completa y aplicar todas las migraciones:
 supabase db reset
 ```
 
-### 4. Configurar el Webhook de Telegram
-Configura tu webhook con `secret_token` para validación segura:
-```bash
-curl -F "url=https://<TU_DOMINIO_O_NGROK>/telegram/webhook" \
-     -F "secret_token=<TU_TELEGRAM_WEBHOOK_SECRET>" \
-     https://api.telegram.org/bot<TU_TELEGRAM_BOT_TOKEN>/setWebhook
-```
-
-### 5. Iniciar el Servidor de Desarrollo
+### 4. Iniciar el Servidor de Desarrollo
 ```bash
 npm run start:dev
 ```
@@ -71,8 +64,21 @@ El servidor estará corriendo en:
 - Documentación Swagger: `http://localhost:3000/docs`
 - Health check: `http://localhost:3000/health`
 
----
+### 5. Registrar el Webhook de Telegram
+Telegram solo entrega mensajes a una URL pública con **https**. En local abre un túnel en otra terminal
+(`ngrok http 3000` o `cloudflared tunnel --url http://localhost:3000`), copia la URL que entrega y ejecútala:
+```bash
+npm run telegram:webhook -- https://<TU_DOMINIO_O_TUNEL>   # registra el webhook con el secret_token del .env
+npm run telegram:webhook -- info                           # muestra la URL registrada y el último error de Telegram
+npm run telegram:webhook -- delete                         # lo quita
+```
+`TELEGRAM_WEBHOOK_SECRET` solo admite letras, números, `_` y `-`. Si cambias de túnel, vuelve a registrar.
 
+### 6. Probar el flujo
+Envía al bot un PDF llamado `000845.pdf` (o una foto con el N° en el texto). Debes recibir "Procesando…" y luego el resumen del reporte.
+Si no llega nada: `npm run telegram:webhook -- info` muestra el error que ve Telegram, y los logs del servidor muestran el resto.
+
+---
 ## 🧪 Pruebas Unitarias
 El proyecto cuenta con suites de pruebas unitarias completas con mocks (sin costo de API):
 
@@ -84,7 +90,7 @@ npm test
 npx jest src/ia-extractor/ia-extractor.spec.ts
 
 # Ejecutar las pruebas de escaneos y bot de Telegram (Backend 2)
-npx jest src/escaneos/escaneos.service.spec.ts src/telegram/telegram-sirep.spec.ts
+npx jest src/escaneos src/telegram
 ```
 
 ---

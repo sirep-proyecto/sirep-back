@@ -117,11 +117,51 @@ describe('Backend 1: Pieza de IA Intercambiable (Guía SIREP pág. 8-10)', () =>
         text: async () => 'Rate limit exceeded',
       } as any);
 
-      const lector = new GeminiLector({ apiKey: 'test-key', fetchFn: mockFetch });
+      const lector = new GeminiLector({ apiKey: 'test-key', fetchFn: mockFetch, esperaBaseMs: 0 });
 
       await expect(lector.leer(dummyBuffer, 'image/jpeg', camposEsperados)).rejects.toThrow(
         ProveedorIaError,
       );
+      // 429 es transitorio: se agotan los 3 intentos antes de rendirse
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('reintenta ante un 503 de sobrecarga y tiene éxito cuando el proveedor se recupera', async () => {
+      const respuestaOk = {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: JSON.stringify({ numero_reporte: '000845', campos: {} }) }] } }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+        }),
+      };
+      const mockFetch = jest
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'high demand' })
+        .mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'high demand' })
+        .mockResolvedValueOnce(respuestaOk);
+
+      const lector = new GeminiLector({ apiKey: 'test-key', fetchFn: mockFetch as any, esperaBaseMs: 0 });
+      const resultado = await lector.leer(dummyBuffer, 'image/jpeg', camposEsperados);
+
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(resultado.numeroReporte).toBe('000845');
+    });
+
+    it('reintenta también si falla la conexión de red', async () => {
+      const mockFetch = jest.fn().mockRejectedValue(new Error('fetch failed'));
+      const lector = new GeminiLector({ apiKey: 'test-key', fetchFn: mockFetch, esperaBaseMs: 0 });
+
+      await expect(lector.leer(dummyBuffer, 'image/jpeg', camposEsperados)).rejects.toThrow('Error de conexión');
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('NO reintenta errores permanentes (clave inválida o modelo inexistente)', async () => {
+      const mockFetch = jest.fn().mockResolvedValue({ ok: false, status: 404, text: async () => 'model not found' });
+      const lector = new GeminiLector({ apiKey: 'test-key', fetchFn: mockFetch as any, esperaBaseMs: 0 });
+
+      await expect(lector.leer(dummyBuffer, 'image/jpeg', camposEsperados)).rejects.toThrow('HTTP 404');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 
