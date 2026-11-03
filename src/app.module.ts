@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TelegramModule } from './telegram/telegram.module';
 import { EscaneosModule } from './escaneos/escaneos.module';
+import { ReportesModule } from './reportes/reportes.module';
 import { HealthController } from './health/health.controller';
 import { AppController } from './app.controller';
 import { CommonModule } from './common/common.module';
@@ -13,6 +14,7 @@ import { CommonModule } from './common/common.module';
     ScheduleModule.forRoot(),
     CommonModule,
     EscaneosModule,
+    ReportesModule,
     TelegramModule,
   ],
   controllers: [AppController, HealthController],

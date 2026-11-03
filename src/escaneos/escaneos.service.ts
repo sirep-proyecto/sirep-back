@@ -9,6 +9,8 @@ import {
 import { SupabaseService } from '../common/supabase.service';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
 import { CampoEsperado, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
+import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
+import { CAMPOS_FORMULARIO } from './campos-formulario';
 import {
   calcularHuellaSHA256,
   esPDF,
@@ -21,7 +23,7 @@ import {
 } from './escaneos.util';
 
 const BUCKET = 'escaneos-originales';
-const EMPRESA_POR_DEFECTO = '00000000-0000-0000-0000-000000000000';
+export const EMPRESA_POR_DEFECTO = '00000000-0000-0000-0000-000000000000';
 
 export class EscaneoDuplicadoError extends ConflictException {
   constructor(
@@ -78,22 +80,8 @@ export class EscaneosService {
   private readonly logger = new Logger(EscaneosService.name);
   private lectorIA: LectorDeReportes | null = null;
 
-  // Campos oficiales del formulario físico de GO Service Latam (Guía pág. 12-13)
-  readonly camposFormulario: CampoEsperado[] = [
-    { clave: 'tecnico', tipo: 'texto', descripcion: 'Nombre del técnico' },
-    { clave: 'empresa', tipo: 'texto', descripcion: 'Nombre del cliente o empresa atendida' },
-    { clave: 'fecha', tipo: 'fecha', descripcion: 'Fecha de atención en el reporte' },
-    { clave: 'direccion', tipo: 'texto', descripcion: 'Dirección de la empresa' },
-    { clave: 'equipo', tipo: 'texto', descripcion: 'Modelo y marca del equipo técnico' },
-    { clave: 'motivo', tipo: 'texto', descripcion: 'Motivo de la orden de servicio' },
-    { clave: 'estado_del_equipo', tipo: 'casilla', descripcion: 'Operativo o Inoperativo' },
-    { clave: 'procedimiento', tipo: 'texto', descripcion: 'Descripción detallada del trabajo realizado' },
-    { clave: 'conclusion', tipo: 'texto', descripcion: 'Conclusión técnica final' },
-    { clave: 'recomendaciones', tipo: 'texto', descripcion: 'Recomendaciones para el cliente' },
-    { clave: 'codigo_repuesto', tipo: 'texto', descripcion: 'Código o número de parte de repuestos usados' },
-    { clave: 'hora_llegada', tipo: 'hora', descripcion: 'Hora de ingreso del técnico' },
-    { clave: 'hora_salida', tipo: 'hora', descripcion: 'Hora de salida del técnico' },
-  ];
+  // Campos del formulario físico de GO Service Latam: ver campos-formulario.ts
+  readonly camposFormulario: CampoEsperado[] = [...CAMPOS_FORMULARIO];
 
   constructor(private readonly supabase: SupabaseService) {
     try {
@@ -229,7 +217,9 @@ export class EscaneosService {
           camposDudosos.push(campo.clave);
         }
       }
-      const estado: 'procesado' | 'en_revision' = camposDudosos.length > 0 ? 'en_revision' : 'procesado';
+      // "procesado" = el modelo leyó y hay campos esperando a una persona; "en_revision" lo asigna la bandeja
+      // cuando alguien ya intervino; sin dudosos el reporte queda "completo". Es la misma regla de la bandeja.
+      const estado: 'procesado' | 'completo' = camposDudosos.length > 0 ? 'procesado' : 'completo';
 
       // 9. Persistir escaneo
       const { data: escaneoInsertado, error: errorEscaneo } = await this.client
@@ -260,10 +250,10 @@ export class EscaneosService {
           throw porHuella
             ? new EscaneoDuplicadoError('archivo_duplicado', 'Este archivo ya fue enviado anteriormente.')
             : new EscaneoDuplicadoError(
-              'reporte_duplicado',
-              `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
-              { numeroReporte },
-            );
+                'reporte_duplicado',
+                `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
+                { numeroReporte },
+              );
         }
         const msg = errorEscaneo?.message || 'No se obtuvo el ID del registro creado';
         this.logger.error(`Error persistiendo escaneo en base de datos: ${msg}`);
@@ -272,19 +262,16 @@ export class EscaneosService {
 
       const escaneoId = escaneoInsertado.id;
 
-      // 10. Persistir reporte (origen histórico, vinculado a su escaneo)
+      // 10. Persistir reporte (origen histórico, vinculado a su escaneo). Todo campo del formulario
+      // tiene su columna: antes solo 6 se guardaban y el resto vivía únicamente en el JSON.
+      const valores = Object.fromEntries(lectura.campos.map((c) => [c.clave, aTexto(c.valor)]));
       const { error: errorReporte } = await this.client.from('reportes').insert({
         empresa_id: empresaId,
         escaneo_id: escaneoId,
         numero_talonario: numeroReporte || null,
         origen: 'historico',
-        cliente: camposMapa.empresa?.valor || null,
-        fecha: normalizarFecha(camposMapa.fecha?.valor),
-        serie_equipo: camposMapa.equipo?.valor || null,
-        procedimiento: camposMapa.procedimiento?.valor || null,
-        codigo_repuesto: camposMapa.codigo_repuesto?.valor || null,
-        tecnico_asignado: camposMapa.tecnico?.valor || null,
-        estado_reporte: estado === 'en_revision' ? 'pendiente_revision' : 'aprobado',
+        ...columnasDesdeValores(valores),
+        estado_reporte: estado === 'procesado' ? 'pendiente_revision' : 'aprobado',
         campos_extraidos: camposMapa,
         campos_dudosos: camposDudosos,
       });

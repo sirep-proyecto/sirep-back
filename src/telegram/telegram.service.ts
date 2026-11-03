@@ -65,8 +65,8 @@ export class TelegramService {
         await this.enviarMensaje(
           chatId,
           `👋 <b>Bienvenido al Bot de SIREP</b>\n\n` +
-          `Envía el reporte técnico escaneado en <b>PDF</b> (anverso y reverso en un solo archivo) o en <b>foto</b>, a 300 dpi.\n` +
-          `Puedes poner el N° de reporte en el mensaje o en el nombre del archivo (ej: <code>000845.pdf</code>).`,
+            `Envía el reporte técnico escaneado en <b>PDF</b> (anverso y reverso en un solo archivo) o en <b>foto</b>, a 300 dpi.\n` +
+            `Puedes poner el N° de reporte en el mensaje o en el nombre del archivo (ej: <code>000845.pdf</code>).`,
         );
         return;
       }
@@ -134,7 +134,7 @@ export class TelegramService {
     mensaje += `<b>Procedimiento:</b> ${dato('procedimiento')}\n`;
     mensaje += `<b>Código repuesto:</b> ${dato('codigo_repuesto')}\n\n`;
 
-    if (resultado.estado === 'en_revision') {
+    if (resultado.camposDudosos.length > 0) {
       mensaje +=
         `⚠️ <b>Atención:</b> pasó a la <b>Bandeja de Revisión</b> por campos dudosos o ilegibles: ` +
         `<code>${escaparHtml(resultado.camposDudosos.join(', '))}</code>.`;

@@ -28,6 +28,9 @@ const ORIGENES_DEV = [
     'http://127.0.0.1:5173',
     'http://localhost:4173',
     'http://localhost:3000',
+    // Bandeja de revisión (Next.js) en desarrollo: el backend ocupa el 3000
+    'http://localhost:3001',
+    'http://127.0.0.1:3001',
 ];
 
 export function esOrigenPermitido(origin: string | undefined): boolean {

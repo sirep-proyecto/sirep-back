@@ -87,9 +87,9 @@ describe('EscaneosService', () => {
   }
 
   beforeAll(async () => {
-    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => { });
-    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => { });
-    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => { });
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => {});
     png = await sharp({ create: { width: 40, height: 40, channels: 3, background: '#ffffff' } }).png().toBuffer();
   });
 
@@ -133,7 +133,7 @@ describe('EscaneosService', () => {
     expect(lector.leer).not.toHaveBeenCalled();
   });
 
-  it('una foto se guarda una sola vez, pasa por la IA y queda en_revision con la fecha en ISO', async () => {
+  it('una foto se guarda una sola vez, pasa por la IA y queda procesado, con campos dudosos y la fecha en ISO', async () => {
     const r = await service.procesarEscaneo({
       buffer: png,
       filename: '000845.png',
@@ -147,7 +147,7 @@ describe('EscaneosService', () => {
     expect(r.totalPaginas).toBe(1);
     expect(r.escaneoId).toBe('nuevo-escaneo-uuid');
     expect(r.numeroReporte).toBe('000845');
-    expect(r.estado).toBe('en_revision');
+    expect(r.estado).toBe('procesado');
     expect(r.camposDudosos).toEqual(['codigo_repuesto']);
     expect(r.campos.empresa.valor).toBe('Minera Los Andes');
     expect(r.metricasIA.costoUsd).toBe(0.0001);

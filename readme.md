@@ -79,6 +79,21 @@ Envía al bot un PDF llamado `000845.pdf` (o una foto con el N° en el texto). D
 Si no llega nada: `npm run telegram:webhook -- info` muestra el error que ve Telegram, y los logs del servidor muestran el resto.
 
 ---
+## 🔌 API de reportes (bandeja de revisión)
+
+El frontend (`sirep-front`, puerto 3001) consume estos endpoints. Los datos son los que llegaron por Telegram:
+
+| Método | Ruta | Qué hace |
+|---|---|---|
+| `GET` | `/reportes` | Lista los reportes digitalizados con sus campos y estado. |
+| `GET` | `/reportes/:numero` | Un reporte con enlaces temporales (1 h) a la imagen de cada página. |
+| `PATCH` | `/reportes/:numero/campos/:campoId` | `{ "tipo": "confirmar" \| "corregir" \| "ilegible" \| "reabrir", "actor": "...", "valor": "..." }` |
+
+- Lo que leyó el modelo **nunca se sobrescribe**: la corrección se guarda aparte (`campos_extraidos.<campo>.revision`) con quién y cuándo.
+- Las columnas de `reportes` (cliente, fecha, equipo…) se actualizan con el valor vigente al corregir.
+- Si dos personas corrigen a la vez, la segunda recibe un `409` y no pisa el trabajo de la primera.
+- Los reportes sin N° legible se abren con `SN-` + los 8 primeros caracteres de su id.
+
 ## 🧪 Pruebas Unitarias
 El proyecto cuenta con suites de pruebas unitarias completas con mocks (sin costo de API):
 
