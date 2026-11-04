@@ -22,7 +22,19 @@ export interface CampoGuardado {
   confianza?: Confianza | null;
   noLeido?: boolean;
   dudoso?: boolean;
+  /** Nota del modelo sobre qué le hizo dudar. */
+  observacion?: string | null;
+  /** Zona del campo en la imagen (coordenadas 0–1) según el modelo; ausente en reportes anteriores. */
+  caja?: { x: number; y: number; ancho: number; alto: number; pagina?: number } | null;
   revision?: RevisionCampo;
+}
+
+export interface RegionContrato {
+  x: number;
+  y: number;
+  ancho: number;
+  alto: number;
+  pagina: number;
 }
 
 export interface CampoContrato {
@@ -30,12 +42,15 @@ export interface CampoContrato {
   valor_modelo: string | null;
   confianza: Confianza | null;
   no_leido: boolean;
+  observacion: string | null;
   valor_corregido: string | null;
   estado_revision: EstadoRevisionCampo;
   revisado_por: string | null;
   revisado_en: string | null;
   corregido_por: string | null;
   corregido_en: string | null;
+  /** Región medida por el modelo sobre este escaneo. Si es null el frontend usa el mapa fijo del talonario. */
+  region: RegionContrato | null;
 }
 
 export const DISENO_TALONARIO = 'talonario-go-service-carta';
@@ -44,6 +59,21 @@ export const DISENO_TALONARIO = 'talonario-go-service-carta';
 export function campoRequiereRevision(campo: CampoGuardado | undefined | null): boolean {
   if (!campo) return true;
   return Boolean(campo.dudoso) || campo.confianza === 'baja' || Boolean(campo.noLeido);
+}
+
+/** Solo se acepta una caja completa y dentro de la hoja; cualquier otra cosa cae al mapa fijo del frontend. */
+export function regionDesdeCaja(caja: CampoGuardado['caja']): RegionContrato | null {
+  if (!caja) return null;
+  const { x, y, ancho, alto } = caja;
+  const validos = [x, y, ancho, alto].every((v) => typeof v === 'number' && Number.isFinite(v));
+  if (!validos || ancho <= 0 || alto <= 0 || x < 0 || y < 0 || x >= 1 || y >= 1) return null;
+  return {
+    x,
+    y,
+    ancho: Math.min(ancho, 1 - x),
+    alto: Math.min(alto, 1 - y),
+    pagina: Math.max(1, Math.floor(caja.pagina ?? 1)),
+  };
 }
 
 export function construirCampos(guardados: Record<string, CampoGuardado> | null | undefined): CampoContrato[] {
@@ -56,12 +86,14 @@ export function construirCampos(guardados: Record<string, CampoGuardado> | null 
       valor_modelo: aTexto(campo?.valor),
       confianza: campo?.confianza ?? null,
       no_leido: campo ? Boolean(campo.noLeido) : true,
+      observacion: typeof campo?.observacion === 'string' && campo.observacion.trim() ? campo.observacion.trim() : null,
       valor_corregido: revision?.valor_corregido ?? null,
       estado_revision: revision?.estado ?? (campoRequiereRevision(campo) ? 'pendiente' : 'auto'),
       revisado_por: revision?.revisado_por ?? null,
       revisado_en: revision?.revisado_en ?? null,
       corregido_por: revision?.corregido_por ?? null,
       corregido_en: revision?.corregido_en ?? null,
+      region: regionDesdeCaja(campo?.caja),
     };
   });
 }

@@ -7,16 +7,18 @@ import { ReportesModule } from './reportes/reportes.module';
 import { HealthController } from './health/health.controller';
 import { AppController } from './app.controller';
 import { CommonModule } from './common/common.module';
+import { RealtimeModule } from './realtime/realtime.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
     CommonModule,
+    RealtimeModule,
     EscaneosModule,
     ReportesModule,
     TelegramModule,
   ],
   controllers: [AppController, HealthController],
 })
-export class AppModule {}
+export class AppModule { }

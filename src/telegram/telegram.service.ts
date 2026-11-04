@@ -65,8 +65,8 @@ export class TelegramService {
         await this.enviarMensaje(
           chatId,
           `👋 <b>Bienvenido al Bot de SIREP</b>\n\n` +
-            `Envía el reporte técnico escaneado en <b>PDF</b> (anverso y reverso en un solo archivo) o en <b>foto</b>, a 300 dpi.\n` +
-            `Puedes poner el N° de reporte en el mensaje o en el nombre del archivo (ej: <code>000845.pdf</code>).`,
+          `Envía el reporte técnico escaneado en <b>PDF</b> (anverso y reverso en un solo archivo) o en <b>foto</b>, a 300 dpi.\n` +
+          `Puedes poner el N° de reporte en el mensaje o en el nombre del archivo (ej: <code>000845.pdf</code>).`,
         );
         return;
       }
@@ -180,12 +180,41 @@ export class TelegramService {
     await this.enviarMensaje(chatId, `❌ <b>Error al procesar el reporte:</b>\n${mensajeUsuario}\nVerifica el archivo y vuelve a intentar.`);
   }
 
+  /**
+   * fetch con tiempo límite y reintentos. "fetch failed" es un fallo de red (DNS, IPv6, VPN,
+   * antivirus, corte momentáneo) y casi siempre se resuelve al reintentar; el motivo real
+   * viene en `err.cause`, que antes no se registraba.
+   */
+  private async fetchConReintentos(
+    url: string,
+    init: RequestInit,
+    etiqueta: string,
+    { intentos = 3, timeoutMs = 30_000 }: { intentos?: number; timeoutMs?: number } = {},
+  ): Promise<Response> {
+    let ultimoError: any;
+    for (let intento = 1; intento <= intentos; intento++) {
+      try {
+        return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      } catch (err: any) {
+        ultimoError = err;
+        const causa = err?.cause?.code ?? err?.cause?.message ?? err?.name ?? err?.message;
+        this.logger.warn(`${etiqueta}: intento ${intento}/${intentos} falló (${causa})`);
+        if (intento < intentos) await new Promise((r) => setTimeout(r, 1000 * 2 ** (intento - 1)));
+      }
+    }
+    throw ultimoError;
+  }
+
   async descargarArchivo(fileId: string): Promise<Buffer> {
     if (!this.token) {
       throw new Error('TELEGRAM_BOT_TOKEN no configurado');
     }
 
-    const resInfo = await fetch(`${this.apiBase}/getFile?file_id=${encodeURIComponent(fileId)}`);
+    const resInfo = await this.fetchConReintentos(
+      `${this.apiBase}/getFile?file_id=${encodeURIComponent(fileId)}`,
+      {},
+      'Telegram getFile',
+    );
     const dataInfo: any = await resInfo.json().catch(() => ({}));
     if (!resInfo.ok || !dataInfo.ok) {
       throw new Error(`Fallo al consultar getFile en Telegram: HTTP ${resInfo.status} ${dataInfo.description ?? ''}`.trim());
@@ -196,7 +225,9 @@ export class TelegramService {
       throw new Error('Telegram no devolvió la ruta del archivo (file_path).');
     }
 
-    const resArchivo = await fetch(`${this.fileBase}/${filePath}`);
+    const resArchivo = await this.fetchConReintentos(`${this.fileBase}/${filePath}`, {}, 'Telegram descarga', {
+      timeoutMs: 90_000,
+    });
     if (!resArchivo.ok) {
       throw new Error(`Fallo al descargar archivo desde Telegram: HTTP ${resArchivo.status}`);
     }
@@ -211,21 +242,27 @@ export class TelegramService {
     }
 
     try {
-      const res = await fetch(`${this.apiBase}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: texto.slice(0, LIMITE_MENSAJE),
-          parse_mode: 'HTML',
-        }),
-      });
+      const res = await this.fetchConReintentos(
+        `${this.apiBase}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: texto.slice(0, LIMITE_MENSAJE),
+            parse_mode: 'HTML',
+          }),
+        },
+        'Telegram sendMessage',
+      );
       if (!res.ok) {
         // Antes un 400 (HTML mal formado, chat bloqueado) se ignoraba en silencio y la secretaria nunca recibía respuesta
         this.logger.error(`Telegram rechazó sendMessage: HTTP ${res.status} ${await res.text().catch(() => '')}`);
       }
     } catch (err: any) {
-      this.logger.error(`Error enviando mensaje a Telegram: ${err?.message}`);
+      this.logger.error(
+        `Error enviando mensaje a Telegram: ${err?.message} (${err?.cause?.code ?? err?.cause?.message ?? 'sin detalle'})`,
+      );
     }
   }
 }

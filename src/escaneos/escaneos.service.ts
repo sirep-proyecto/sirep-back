@@ -5,8 +5,10 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  Optional,
 } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase.service';
+import { EventosGateway } from '../realtime/eventos.gateway';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
 import { CampoEsperado, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
@@ -83,7 +85,11 @@ export class EscaneosService {
   // Campos del formulario físico de GO Service Latam: ver campos-formulario.ts
   readonly camposFormulario: CampoEsperado[] = [...CAMPOS_FORMULARIO];
 
-  constructor(private readonly supabase: SupabaseService) {
+  constructor(
+    private readonly supabase: SupabaseService,
+    // Opcional para que las pruebas unitarias no necesiten el canal en vivo
+    @Optional() private readonly eventos?: EventosGateway,
+  ) {
     try {
       this.lectorIA = crearLectorDeReportes();
       this.logger.log(`Lector de IA inicializado: ${this.lectorIA.nombre} (${this.lectorIA.modelo})`);
@@ -189,10 +195,15 @@ export class EscaneosService {
     try {
       // 6. Lectura con el modelo, página por página, y fusión de resultados
       const lecturas: ResultadoLectura[] = [];
-      for (const pagina of imagenesPaginas) {
+      for (const [indice, pagina] of imagenesPaginas.entries()) {
         const copiaIA = await optimizarParaIA(pagina);
         try {
-          lecturas.push(await lector.leer(copiaIA.buffer, copiaIA.mimetype, this.camposFormulario));
+          const lecturaPagina = await lector.leer(copiaIA.buffer, copiaIA.mimetype, this.camposFormulario);
+          // La caja del modelo es relativa a la imagen de ESTA página: se anota cuál es
+          for (const campo of lecturaPagina.campos) {
+            if (campo.caja) campo.caja.pagina = indice + 1;
+          }
+          lecturas.push(lecturaPagina);
         } catch (err: any) {
           this.logger.error(`Error en la extracción con IA: ${err?.message}`);
           throw new LecturaIAError(err?.message ?? 'error desconocido');
@@ -250,10 +261,10 @@ export class EscaneosService {
           throw porHuella
             ? new EscaneoDuplicadoError('archivo_duplicado', 'Este archivo ya fue enviado anteriormente.')
             : new EscaneoDuplicadoError(
-                'reporte_duplicado',
-                `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
-                { numeroReporte },
-              );
+              'reporte_duplicado',
+              `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
+              { numeroReporte },
+            );
         }
         const msg = errorEscaneo?.message || 'No se obtuvo el ID del registro creado';
         this.logger.error(`Error persistiendo escaneo en base de datos: ${msg}`);
@@ -282,6 +293,8 @@ export class EscaneosService {
         this.logger.error(`Error persistiendo reporte técnico: ${errorReporte.message}`);
         throw new InternalServerErrorException(`Error al registrar reporte técnico: ${errorReporte.message}`);
       }
+
+      this.eventos?.emitirCambio('creado', numeroReporte);
 
       return {
         escaneoId,

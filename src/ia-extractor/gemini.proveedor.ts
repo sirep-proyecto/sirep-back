@@ -1,4 +1,5 @@
 import {
+  CajaCampo,
   CampoEsperado,
   CampoLeido,
   Confianza,
@@ -175,6 +176,7 @@ export class GeminiLector implements LectorDeReportes {
           noLeido: true,
           dudoso: false,
           observacion: extraido?.observacion || 'No detectado en el documento',
+          caja: this.normalizarCaja(extraido?.caja_2d),
         };
       }
 
@@ -200,8 +202,33 @@ export class GeminiLector implements LectorDeReportes {
         noLeido: false,
         dudoso,
         observacion: extraido.observacion,
+        caja: this.normalizarCaja(extraido.caja_2d),
       };
     });
+  }
+
+  /**
+   * Convierte la caja del modelo [ymin, xmin, ymax, xmax] (escala 0–1000) a coordenadas 0–1.
+   * Se ensancha un poco porque el modelo suele ajustar la caja a la tinta y la letra manuscrita
+   * se sale de la línea. Una caja inválida se descarga (null): el frontend usa entonces el mapa fijo.
+   */
+  private normalizarCaja(bruta: unknown): CajaCampo | null {
+    if (!Array.isArray(bruta) || bruta.length !== 4) return null;
+    const n = bruta.map(Number);
+    if (n.some((v) => !Number.isFinite(v))) return null;
+    const [ymin, xmin, ymax, xmax] = n.map((v) => Math.min(1000, Math.max(0, v)));
+    if (ymax <= ymin || xmax <= xmin) return null;
+    // Una caja que cubre casi toda la hoja es una respuesta vacía del modelo, no un campo
+    if ((ymax - ymin) * (xmax - xmin) > 600_000) return null;
+
+    const margenX = 6;
+    const margenY = 5;
+    const r = (v: number) => Number((v / 1000).toFixed(4));
+    const x0 = Math.max(0, xmin - margenX);
+    const y0 = Math.max(0, ymin - margenY);
+    const x1 = Math.min(1000, xmax + margenX);
+    const y1 = Math.min(1000, ymax + margenY);
+    return { x: r(x0), y: r(y0), ancho: r(x1 - x0), alto: r(y1 - y0) };
   }
 
   private calcularCosto(tokensIn: number, tokensOut: number): number {
@@ -225,6 +252,13 @@ REGLAS OBLIGATORIAS (Guía SIREP):
 4. Para casillas de verificación: Una casilla sin marca es valor: null (noLeido: true), no false. Si hay marca ambigua, confianza "baja".
 5. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
 6. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
+7. Para CADA campo devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000, medidos sobre la IMAGEN COMPLETA que recibes (0,0 = esquina superior izquierda de la imagen, no de la hoja; la hoja puede estar desplazada, recortada o inclinada).
+   - Encierra únicamente el espacio donde se escribe el valor (la línea o recuadro con la letra manuscrita), NO la etiqueta impresa como "EMPRESA:" o "FECHA:".
+   - Si el campo está vacío, encierra su recuadro o línea vacía.
+   - En textos largos (procedimiento, conclusión, recomendaciones) encierra todo el recuadro de escritura.
+   - Si no logras ubicar el campo, usa null.
+   - Localiza cada campo por la etiqueta impresa que lo acompaña en ESTA imagen; no asumas posiciones de otros reportes.
+8. En "observacion" escribe, en español y en una frase corta, QUÉ te hizo dudar (ej. "la segunda letra parece una o o una a", "el último dígito se confunde entre 3 y 8", "casilla sin marca clara"). Si la confianza es "alta", déjala vacía.
 
 CAMPOS SOLICITADOS:
 ${JSON.stringify(campos)}
@@ -238,7 +272,8 @@ Responde ESTRICTAMENTE con un objeto JSON:
       "confianza": "alta" | "media" | "baja",
       "noLeido": boolean,
       "dudoso": boolean,
-      "observacion": string
+      "observacion": string,
+      "caja_2d": [ymin, xmin, ymax, xmax] | null
     }
   }
 }`;

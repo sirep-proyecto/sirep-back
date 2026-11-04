@@ -14,6 +14,16 @@ export interface CampoEsperado {
   descripcion?: string;
 }
 
+/** Zona del campo en la imagen de la página, en coordenadas normalizadas 0–1 (origen arriba a la izquierda). */
+export interface CajaCampo {
+  x: number;
+  y: number;
+  ancho: number;
+  alto: number;
+  /** Página (base 1) donde está el campo; la asigna EscaneosService al leer cada página. */
+  pagina?: number;
+}
+
 export interface CampoLeido {
   clave: string;
   /** Valor extraído, booleano para casillas, o null si no se pudo leer */
@@ -26,6 +36,8 @@ export interface CampoLeido {
   dudoso?: boolean;
   /** Justificación u observación opcional del modelo */
   observacion?: string;
+  /** Dónde está el campo en la imagen, según el modelo. Permite resaltar el sitio real aunque el escaneo esté desplazado o inclinado. */
+  caja?: CajaCampo | null;
 }
 
 export interface UsoLlamada {

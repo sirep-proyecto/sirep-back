@@ -5,8 +5,10 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase.service';
+import { EventosGateway } from '../realtime/eventos.gateway';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
 import { EMPRESA_POR_DEFECTO } from '../escaneos/escaneos.service';
 import { AccionRevisionDto } from './dto/accion-revision.dto';
@@ -34,7 +36,11 @@ const SELECCION =
 export class ReportesService {
   private readonly logger = new Logger(ReportesService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    // Opcional para que las pruebas unitarias no necesiten el canal en vivo
+    @Optional() private readonly eventos?: EventosGateway,
+  ) { }
 
   private get client() {
     return this.supabase.getClient();
@@ -133,6 +139,8 @@ export class ReportesService {
         this.logger.warn(`No se pudo sincronizar el estado del escaneo: ${errorEscaneo.message}`);
       }
     }
+
+    this.eventos?.emitirCambio('actualizado', numero);
 
     return this.obtener(numero);
   }
