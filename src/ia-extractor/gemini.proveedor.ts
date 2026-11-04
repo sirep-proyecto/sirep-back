@@ -7,6 +7,7 @@ import {
   ProveedorIaError,
   ResultadoLectura,
 } from './types';
+import { OBSERVACION_EN_BLANCO, casillaMarcada, esCampoEnBlanco } from './normalizacion';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -163,6 +164,18 @@ export class GeminiLector implements LectorDeReportes {
     return camposEsperados.map((esperado) => {
       const extraido = camposRespuesta[esperado.clave];
 
+      if (esCampoEnBlanco(esperado, extraido)) {
+        return {
+          clave: esperado.clave,
+          valor: null,
+          confianza: 'alta' as Confianza,
+          noLeido: false,
+          dudoso: false,
+          observacion: OBSERVACION_EN_BLANCO,
+          caja: this.normalizarCaja(extraido?.caja_2d),
+        };
+      }
+
       if (
         !extraido ||
         extraido.valor === undefined ||
@@ -187,10 +200,7 @@ export class GeminiLector implements LectorDeReportes {
 
       let valor = extraido.valor;
       if (esperado.tipo === 'casilla') {
-        if (typeof valor === 'string') {
-          const valMin = valor.toLowerCase().trim();
-          valor = valMin === 'true' || valMin === 'marcado' || valMin === 'x' || valMin === 'si';
-        }
+        valor = casillaMarcada(valor);
       } else {
         valor = String(valor).trim();
       }
@@ -249,7 +259,9 @@ REGLAS OBLIGATORIAS (Guía SIREP):
    - "alta": La letra es legible sin ninguna ambigüedad.
    - "media": Se entiende por contexto pero algún carácter o número es dudoso.
    - "baja": Muy difícil de descifrar o incompleto. Marca dudoso: true.
-4. Para casillas de verificación: Una casilla sin marca es valor: null (noLeido: true), no false. Si hay marca ambigua, confianza "baja".
+4. Para casillas de verificación (tipo "casilla"): si está marcada devuelve true; una casilla sin marca es valor: null, no false. Si hay marca ambigua, confianza "baja".
+   Para campos tipo "opcion" devuelve el TEXTO exacto de la casilla marcada entre "opciones" (ej. "Limpio"); si no hay ninguna marcada, valor: null; si hay dos marcadas, ambas separadas por " / " y confianza "media".
+   Para firmas devuelve true si hay una firma manuscrita sobre la línea y valor: null si la línea está vacía.
 5. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
 6. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
 7. Para CADA campo devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000, medidos sobre la IMAGEN COMPLETA que recibes (0,0 = esquina superior izquierda de la imagen, no de la hoja; la hoja puede estar desplazada, recortada o inclinada).
@@ -259,6 +271,7 @@ REGLAS OBLIGATORIAS (Guía SIREP):
    - Si no logras ubicar el campo, usa null.
    - Localiza cada campo por la etiqueta impresa que lo acompaña en ESTA imagen; no asumas posiciones de otros reportes.
 8. En "observacion" escribe, en español y en una frase corta, QUÉ te hizo dudar (ej. "la segunda letra parece una o o una a", "el último dígito se confunde entre 3 y 8", "casilla sin marca clara"). Si la confianza es "alta", déjala vacía.
+9. Cada campo trae "opcional": true o false. Si es opcional y el espacio está completamente en blanco en el papel (nadie escribió ni marcó nada), devuelve valor: null y "vacio": true. Si hay algo escrito o marcado pero no logras leerlo, devuelve "vacio": false y noLeido: true. Nunca pongas "vacio": true en un campo donde veas tinta.
 
 CAMPOS SOLICITADOS:
 ${JSON.stringify(campos)}
@@ -273,6 +286,7 @@ Responde ESTRICTAMENTE con un objeto JSON:
       "noLeido": boolean,
       "dudoso": boolean,
       "observacion": string,
+      "vacio": boolean,
       "caja_2d": [ymin, xmin, ymax, xmax] | null
     }
   }

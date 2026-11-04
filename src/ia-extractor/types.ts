@@ -9,9 +9,16 @@ export interface CampoEsperado {
   /** Clave del campo, ej. 'fecha', 'motivo', 'procedimiento', 'numero_reporte' */
   clave: string;
   /** Tipo de campo para guiar la normalización y validación */
-  tipo: 'texto' | 'fecha' | 'hora' | 'casilla' | 'numero' | 'tabla';
+  tipo: 'texto' | 'fecha' | 'hora' | 'casilla' | 'opcion' | 'numero' | 'tabla';
   /** Pista contextual o descripción para el modelo de IA */
   descripcion?: string;
+  /** Solo para tipo "opcion": las casillas impresas entre las que se marca una (ej. Limpio / Sucio). */
+  opciones?: string[];
+  /**
+   * El papel suele traer este campo en blanco. Si el modelo confirma que está en blanco
+   * ("vacio": true) no se marca como dudoso ni como no leído.
+   */
+  opcional?: boolean;
 }
 
 /** Zona del campo en la imagen de la página, en coordenadas normalizadas 0–1 (origen arriba a la izquierda). */

@@ -1,4 +1,4 @@
-import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
+import { IDS_CAMPOS_FORMULARIO, IDS_CAMPOS_OPCIONALES } from '../escaneos/campos-formulario';
 import { aTexto } from './reportes.columnas';
 
 export type Confianza = 'alta' | 'media' | 'baja';
@@ -81,14 +81,17 @@ export function construirCampos(guardados: Record<string, CampoGuardado> | null 
   return IDS_CAMPOS_FORMULARIO.map((id) => {
     const campo = fuente[id];
     const revision = campo?.revision;
+    // Un campo opcional que este reporte no trae (reportes procesados antes de ampliar el
+    // formulario) es "en blanco", no un fallo de lectura: no debe inundar la bandeja.
+    const ausenteOpcional = !campo && IDS_CAMPOS_OPCIONALES.has(id);
     return {
       id,
       valor_modelo: aTexto(campo?.valor),
-      confianza: campo?.confianza ?? null,
-      no_leido: campo ? Boolean(campo.noLeido) : true,
+      confianza: campo?.confianza ?? (ausenteOpcional ? 'alta' : null),
+      no_leido: campo ? Boolean(campo.noLeido) : !ausenteOpcional,
       observacion: typeof campo?.observacion === 'string' && campo.observacion.trim() ? campo.observacion.trim() : null,
       valor_corregido: revision?.valor_corregido ?? null,
-      estado_revision: revision?.estado ?? (campoRequiereRevision(campo) ? 'pendiente' : 'auto'),
+      estado_revision: revision?.estado ?? (!ausenteOpcional && campoRequiereRevision(campo) ? 'pendiente' : 'auto'),
       revisado_por: revision?.revisado_por ?? null,
       revisado_en: revision?.revisado_en ?? null,
       corregido_por: revision?.corregido_por ?? null,

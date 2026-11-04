@@ -1,4 +1,4 @@
-import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
+import { IDS_CAMPOS_FORMULARIO, IDS_CAMPOS_OPCIONALES } from '../escaneos/campos-formulario';
 import {
   CampoGuardado,
   aReporteContrato,
@@ -41,9 +41,16 @@ describe('reportes.mapper', () => {
     expect(por.fecha.estado_revision).toBe('pendiente');
   });
 
-  it('un campo que falta en lo guardado se trata como pendiente sin lectura, no se inventa un valor', () => {
-    const campos = construirCampos({});
-    expect(campos.every((c) => c.estado_revision === 'pendiente' && c.valor_modelo === null && c.no_leido)).toBe(true);
+  it('un campo obligatorio que falta en lo guardado queda pendiente sin lectura, no se inventa un valor', () => {
+    const obligatorios = construirCampos({}).filter((c) => !IDS_CAMPOS_OPCIONALES.has(c.id));
+    expect(obligatorios.length).toBeGreaterThan(0);
+    expect(obligatorios.every((c) => c.estado_revision === 'pendiente' && c.valor_modelo === null && c.no_leido)).toBe(true);
+  });
+
+  it('un campo opcional que falta (reporte anterior a la ampliación del formulario) queda en blanco, no pendiente', () => {
+    const opcionales = construirCampos({}).filter((c) => IDS_CAMPOS_OPCIONALES.has(c.id));
+    expect(opcionales.length).toBeGreaterThan(10);
+    expect(opcionales.every((c) => c.estado_revision === 'auto' && c.valor_modelo === null && !c.no_leido)).toBe(true);
   });
 
   it('convierte casillas y números a texto', () => {

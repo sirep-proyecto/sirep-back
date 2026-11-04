@@ -6,6 +6,7 @@ import {
   ProveedorIaError,
   ResultadoLectura,
 } from './types';
+import { OBSERVACION_EN_BLANCO, casillaMarcada, esCampoEnBlanco } from './normalizacion';
 
 export interface OpenAIConfig {
   apiKey: string;
@@ -140,6 +141,17 @@ export class OpenAILector implements LectorDeReportes {
     return camposEsperados.map((esperado) => {
       const extraido = camposRespuesta[esperado.clave];
 
+      if (esCampoEnBlanco(esperado, extraido)) {
+        return {
+          clave: esperado.clave,
+          valor: null,
+          confianza: 'alta' as Confianza,
+          noLeido: false,
+          dudoso: false,
+          observacion: OBSERVACION_EN_BLANCO,
+        };
+      }
+
       if (
         !extraido ||
         extraido.valor === undefined ||
@@ -163,10 +175,7 @@ export class OpenAILector implements LectorDeReportes {
 
       let valor = extraido.valor;
       if (esperado.tipo === 'casilla') {
-        if (typeof valor === 'string') {
-          const valMin = valor.toLowerCase().trim();
-          valor = valMin === 'true' || valMin === 'marcado' || valMin === 'x' || valMin === 'si';
-        }
+        valor = casillaMarcada(valor);
       } else {
         valor = String(valor).trim();
       }
@@ -185,7 +194,9 @@ export class OpenAILector implements LectorDeReportes {
   private construirPrompt(campos: CampoEsperado[]): string {
     return `Eres un transcriptor de reportes técnicos industriales manuscritos.
 No inventes datos. Si un campo no se lee, valor: null y noLeido: true.
+Casillas (tipo casilla): true si está marcada, null si no. Tipo opcion: devuelve el texto de la casilla marcada entre "opciones" o null.
+Si un campo opcional está completamente en blanco en el papel, devuelve valor: null y vacio: true (no noLeido). Si hay algo escrito que no logras leer, vacio: false y noLeido: true.
 Campos esperados: ${JSON.stringify(campos)}.
-Devuelve JSON: { "numero_reporte": string|null, "campos": { [clave]: { valor, confianza, noLeido, dudoso, observacion } } }`;
+Devuelve JSON: { "numero_reporte": string|null, "campos": { [clave]: { valor, confianza, noLeido, dudoso, observacion, vacio } } }`;
   }
 }

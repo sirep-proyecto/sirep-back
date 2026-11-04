@@ -237,3 +237,52 @@ describe('Backend 1: Pieza de IA Intercambiable (Guía SIREP pág. 8-10)', () =>
     });
   });
 });
+describe('Campos opcionales, opciones y casillas', () => {
+  const campos: CampoEsperado[] = [
+    { clave: 'telefono', tipo: 'texto', opcional: true },
+    { clave: 'tinta', tipo: 'texto', opcional: true },
+    { clave: 'limpieza_equipo', tipo: 'opcion', opcional: true, opciones: ['Limpio', 'Sucio'] },
+    { clave: 'facturado', tipo: 'casilla', opcional: true },
+    { clave: 'empresa', tipo: 'texto' },
+  ];
+
+  const respuesta = (camposRespuesta: Record<string, unknown>) =>
+    jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ numero_reporte: '000214', campos: camposRespuesta }) }] } }],
+        usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20 },
+      }),
+    } as any);
+
+  const leer = async (camposRespuesta: Record<string, unknown>) => {
+    const lector = new GeminiLector({ apiKey: 'k', fetchFn: respuesta(camposRespuesta) });
+    const r = await lector.leer(Buffer.from('x'), 'image/jpeg', campos);
+    return Object.fromEntries(r.campos.map((c) => [c.clave, c]));
+  };
+
+  it('un campo opcional en blanco ("vacio": true) no es dudoso ni no leído', async () => {
+    const por = await leer({ telefono: { valor: null, vacio: true } });
+    expect(por.telefono).toMatchObject({ valor: null, noLeido: false, dudoso: false, confianza: 'alta' });
+  });
+
+  it('un campo opcional con algo escrito que no se pudo leer sigue siendo no leído', async () => {
+    const por = await leer({ tinta: { valor: null, vacio: false, noLeido: true } });
+    expect(por.tinta).toMatchObject({ noLeido: true });
+  });
+
+  it('un campo obligatorio vacío sigue siendo no leído aunque el modelo diga "vacio"', async () => {
+    const por = await leer({ empresa: { valor: null, vacio: true } });
+    expect(por.empresa).toMatchObject({ noLeido: true });
+  });
+
+  it('un campo tipo opción conserva el texto de la casilla marcada (antes se convertía en "No")', async () => {
+    const por = await leer({ limpieza_equipo: { valor: 'Limpio', confianza: 'alta' } });
+    expect(por.limpieza_equipo.valor).toBe('Limpio');
+  });
+
+  it('una casilla acepta "Sí" con tilde', async () => {
+    const por = await leer({ facturado: { valor: 'Sí', confianza: 'alta' } });
+    expect(por.facturado.valor).toBe(true);
+  });
+});
