@@ -46,7 +46,10 @@ if (accion === 'info') {
     await llamar('deleteWebhook', { drop_pending_updates: true });
     console.log('Webhook eliminado.');
 } else {
-    const base = (accion || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+    const base = (accion || process.env.PUBLIC_URL || '')
+        .split('->')[0]
+        .trim()
+        .replace(/\/+$/, '');
     if (!base.startsWith('https://')) {
         console.error('Telegram exige una URL pública con https. Pasa la URL como argumento o define PUBLIC_URL en el .env.');
         console.error('En local usa un túnel (ngrok http 3000, o cloudflared tunnel --url http://localhost:3000).');
