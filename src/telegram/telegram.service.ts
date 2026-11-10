@@ -117,22 +117,99 @@ export class TelegramService {
   }
 
   private formatearResultado(resultado: ResultadoProcesamientoEscaneo): string {
-    // Las claves son las de EscaneosService.camposFormulario ('empresa' y 'equipo'; antes se
-    // buscaban 'cliente' y 'serie_equipo', que el modelo nunca devuelve, y siempre salía "No detectado").
-    const dato = (clave: string, maxLargo = 200): string => {
-      const valor = resultado.campos[clave]?.valor;
-      if (valor === null || valor === undefined || valor === '') return '<i>[No detectado]</i>';
-      const texto = typeof valor === 'boolean' ? (valor ? 'Sí' : 'No') : String(valor);
+    const dudososSet = new Set(resultado.camposDudosos);
+
+    const leerTexto = (clave: string, textoVacio: string, maxLargo = 600): string => {
+      const campo = resultado.campos[clave];
+      const valor = campo?.valor;
+      if (valor === null || valor === undefined || valor === '') {
+        if (campo?.noLeido || dudososSet.has(clave)) {
+          return '<i>[No detectado]</i>';
+        }
+        return textoVacio;
+      }
+      const texto = typeof valor === 'boolean' ? (valor ? 'Sí' : 'No') : String(valor).trim();
+      if (!texto) return textoVacio;
       const recortado = texto.length > maxLargo ? `${texto.slice(0, maxLargo)}…` : texto;
       return escaparHtml(recortado);
     };
 
-    let mensaje = `✅ <b>Reporte N° ${escaparHtml(resultado.numeroReporte)} registrado</b> (${resultado.totalPaginas} pág.)\n\n`;
-    mensaje += `<b>Empresa:</b> ${dato('empresa')}\n`;
-    mensaje += `<b>Fecha:</b> ${dato('fecha')}\n`;
-    mensaje += `<b>Equipo:</b> ${dato('equipo')}\n`;
-    mensaje += `<b>Procedimiento:</b> ${dato('procedimiento')}\n`;
-    mensaje += `<b>Código repuesto:</b> ${dato('codigo_repuesto')}\n\n`;
+    const num = escaparHtml(resultado.numeroReporte);
+    const llegada = leerTexto('hora_llegada', '');
+    const salida = leerTexto('hora_salida', '');
+    const horario = llegada || salida ? `${llegada || '—'} - ${salida || '—'}` : 'No especificado';
+
+    const ln = leerTexto('revision_linea_ln', '');
+    const lt = leerTexto('revision_linea_lt', '');
+    const nt = leerTexto('revision_linea_nt', '');
+    const tieneLineas = Boolean(ln || lt || nt);
+
+    const repTipo = leerTexto('repuestos_tipo', '');
+    const repCod = leerTexto('codigo_repuesto', '');
+    const repDesc = leerTexto('repuestos_descripcion', '');
+    const repCant = leerTexto('repuestos_cantidad', '');
+    const tieneRepuestos = Boolean(repTipo || repCod || repDesc || repCant);
+
+    const firmaOp = resultado.campos.firma_operador?.valor ? 'Firmado' : 'Sin firmar';
+    const firmaCli = resultado.campos.firma_cliente?.valor ? 'Firmado' : 'Sin firmar';
+    const garantia = resultado.campos.garantia?.valor ? 'Sí' : 'No';
+    const facturado = resultado.campos.facturado?.valor ? 'Sí' : 'No';
+
+    let mensaje = `✅ <b>Reporte N° ${num} registrado</b> (${resultado.totalPaginas} pág.)\n\n`;
+    mensaje += `<b># Reporte Técnico de Servicio Nº ${num}</b>\n\n`;
+
+    mensaje += `<b>## Información General</b>\n`;
+    mensaje += `- <b>Nº de Reporte:</b> <code>${num}</code>\n`;
+    mensaje += `- <b>Fecha:</b> ${leerTexto('fecha', 'No especificada')}\n`;
+    mensaje += `- <b>Horario:</b> ${horario}\n`;
+    mensaje += `- <b>Técnico:</b> ${leerTexto('tecnico', 'No especificado')}\n`;
+    mensaje += `- <b>Empresa / Cliente:</b> ${leerTexto('empresa', 'No especificado')}\n`;
+    const telf = leerTexto('telefono', '');
+    if (telf) mensaje += `- <b>Teléfono:</b> ${telf}\n`;
+    mensaje += `- <b>Dirección:</b> ${leerTexto('direccion', 'No especificada')}\n`;
+    const contacto = leerTexto('contacto', '');
+    if (contacto) mensaje += `- <b>Contacto:</b> ${contacto}\n`;
+    mensaje += `- <b>Equipo:</b> ${leerTexto('equipo', 'No especificado')}\n`;
+    mensaje += `- <b>Motivo del Servicio:</b> ${leerTexto('motivo', 'No especificado')}\n\n`;
+
+    mensaje += `<b>## Revisión Inicial</b>\n`;
+    mensaje += `- <b>Estado del Equipo:</b> ${leerTexto('estado_del_equipo', 'No marcado')}\n`;
+    const ultMant = leerTexto('ultimo_mantenimiento', '');
+    if (ultMant) mensaje += `- <b>Último Mantenimiento:</b> ${ultMant}\n`;
+    mensaje += `- <b>Limpieza del Equipo:</b> ${leerTexto('limpieza_equipo', 'No marcado')}\n`;
+    mensaje += `- <b>Cabezales:</b> ${leerTexto('cabezales', 'No marcado')}\n`;
+    mensaje += `- <b>Sistema de Protección:</b> ${leerTexto('sistema_proteccion', 'No marcado')}\n`;
+    mensaje += `- <b>Tinta:</b> ${leerTexto('tinta', 'No marcado')}\n`;
+    if (tieneLineas) {
+      mensaje += `- <b>Revisión de Líneas:</b> L+N: ${ln || '-'} · L+T: ${lt || '-'} · N+T: ${nt || '-'}\n`;
+    }
+    const operador = leerTexto('operador', '');
+    if (operador) mensaje += `- <b>Operador:</b> ${operador}\n`;
+    mensaje += `\n`;
+
+    mensaje += `<b>## Procedimiento Realizado</b>\n`;
+    mensaje += `${leerTexto('procedimiento', 'Ninguno registrado.', 1000)}\n\n`;
+
+    mensaje += `<b>## Conclusión</b>\n`;
+    mensaje += `${leerTexto('conclusion', 'Ninguna registrada.', 600)}\n\n`;
+
+    mensaje += `<b>## Recomendaciones</b>\n`;
+    mensaje += `${leerTexto('recomendaciones', 'Ninguna registrada.', 600)}\n\n`;
+
+    mensaje += `<b>## Repuestos Requeridos / Usados</b>\n`;
+    if (tieneRepuestos) {
+      if (repTipo) mensaje += `- <b>Tipo:</b> ${repTipo}\n`;
+      if (repCod) mensaje += `- <b>Código:</b> ${repCod}\n`;
+      if (repDesc) mensaje += `- <b>Descripción:</b> ${repDesc}\n`;
+      if (repCant) mensaje += `- <b>Cantidad:</b> ${repCant}\n`;
+      mensaje += `\n`;
+    } else {
+      mensaje += `Ninguno registrado\n\n`;
+    }
+
+    mensaje += `<b>## Conformidad y Cierre</b>\n`;
+    mensaje += `- <b>Garantía:</b> ${garantia} · <b>Facturado:</b> ${facturado}\n`;
+    mensaje += `- <b>Firmas:</b> Operador: ${firmaOp} · Cliente: ${firmaCli}\n\n`;
 
     if (resultado.camposDudosos.length > 0) {
       mensaje +=

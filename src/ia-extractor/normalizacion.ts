@@ -97,6 +97,14 @@ export function construirContextoDesdeReportes(
     empresa: new Set(['Abregu', 'Abregu Print', 'Cecely']),
     tecnico: new Set(['Orlando', 'Antony', 'Antony Yaranga', 'Carlos']),
     equipo: new Set(['UV DTF', 'Plotter DTF UV', 'Plotter DTF', 'UV Cama plana', 'Subli 3H', 'DTF 60cm']),
+    direccion: new Set([
+      'Galeria Yuyi',
+      'Yuyi',
+      'Galeria Yuyi 1656 Puerta a calle',
+      'Jiron San Cristobal 1656',
+      'Gutierrez Noriega 233',
+    ]),
+    sistema_proteccion: new Set(['Estab.', 'UPS', 'Ninguno', 'Nada']),
     contacto: new Set(['Vladimir', 'Julio']),
     operador: new Set(['Fiorella', 'Zamir', 'Adriana', 'Alexander']),
   };

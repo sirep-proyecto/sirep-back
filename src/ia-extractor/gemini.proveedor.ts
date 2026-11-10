@@ -303,10 +303,11 @@ REGLAS OBLIGATORIAS (Guía SIREP):
    - Verifica dentro de cuál cuadrado exacto está trazado el check (✓ o X). No confundas una marca dentro de la casilla de "Limpio [✓]" con la palabra "Sucio" que está a su derecha.
    - Para campos tipo "casilla": si está marcada devuelve true; si no tiene marca, omítelo (o valor: null).
    - Para campos tipo "opcion": devuelve el TEXTO exacto de la opción cuya casilla derecha está marcada (ej. "Limpio"); si ninguna está marcada, omítelo.
-   - Para "sistema_proteccion": revisa tanto las casillas "Estab." y "UPS" como el recuadro de al lado (si la casilla "Estab." está marcada, devuelve "Estab.").
+   - Para "sistema_proteccion": revisa tanto las casillas "Estab." y "UPS" como el recuadro de al lado (si la casilla "Estab." está marcada, devuelve "Estab."; si en el recuadro dice "ninguno" o "nada", devuelve ese texto con confianza "alta").
    - Para firmas ("firma_operador", "firma_cliente"): devuelve true si hay firma o rúbrica en tinta sobre la línea; si la línea está vacía, omítelo.
-5. COHERENCIA EN HORAS ("hora_llegada" y "hora_salida"):
-   - Lee con cuidado los dígitos manuscritos (ej. no confundir un "5" de trazo cerrado con un "8"). Verifica que "hora_salida" sea coherente con "hora_llegada" dentro de la jornada.
+5. FECHAS Y HORAS ("fecha", "hora_llegada" y "hora_salida"):
+   - En manuscritos de Perú el dígito "7" suele escribirse con una rayita horizontal en el medio (7̶); no lo confundas con un "9" (ej. "07-02-24").
+   - Lee con cuidado los dígitos manuscritos de las horas (ej. no confundir un "5" de trazo cerrado con un "8"). Verifica que "hora_salida" sea coherente con "hora_llegada" dentro de la jornada.
 6. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
 7. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
 8. Para cada campo con tinta que incluyas en "campos", devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000 medidos sobre la IMAGEN COMPLETA (encerrando solo el área con el valor manuscrito, no la etiqueta impresa).
