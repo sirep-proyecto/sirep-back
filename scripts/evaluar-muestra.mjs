@@ -116,6 +116,52 @@ try {
   ];
 }
 
+// Parseador CSV compatible con RFC 4180 (soporta comas y saltos de línea entre comillas)
+function parsearCsvRfc4180(texto) {
+  const limpio = texto.replace(/^\uFEFF/, '');
+  const filas = [];
+  let filaActual = [];
+  let campoActual = '';
+  let enComillas = false;
+
+  for (let i = 0; i < limpio.length; i++) {
+    const ch = limpio[i];
+    if (enComillas) {
+      if (ch === '"') {
+        if (limpio[i + 1] === '"') {
+          campoActual += '"';
+          i++;
+        } else {
+          enComillas = false;
+        }
+      } else {
+        campoActual += ch;
+      }
+    } else if (ch === '"') {
+      enComillas = true;
+    } else if (ch === ',') {
+      filaActual.push(campoActual.trim());
+      campoActual = '';
+    } else if (ch === '\n') {
+      filaActual.push(campoActual.replace(/\r$/, '').trim());
+      if (filaActual.length > 1 || filaActual[0] !== '') {
+        filas.push(filaActual);
+      }
+      filaActual = [];
+      campoActual = '';
+    } else {
+      campoActual += ch;
+    }
+  }
+  if (campoActual || filaActual.length > 0) {
+    filaActual.push(campoActual.replace(/\r$/, '').trim());
+    if (filaActual.length > 1 || filaActual[0] !== '') {
+      filas.push(filaActual);
+    }
+  }
+  return filas;
+}
+
 // Cargar plantilla de referencia
 function cargarPlantillaReferencia(ruta) {
   const referencia = new Map();
@@ -123,13 +169,13 @@ function cargarPlantillaReferencia(ruta) {
     console.warn(`⚠️ Aviso: No se encontró plantilla en ${ruta}. Se simularán valores de referencia para pruebas.`);
     return referencia;
   }
-  const contenido = fs.readFileSync(ruta, 'utf-8').replace(/^\uFEFF/, '');
-  const lineas = contenido.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lineas.length <= 1) return referencia;
+  const contenido = fs.readFileSync(ruta, 'utf-8');
+  const filas = parsearCsvRfc4180(contenido);
+  if (filas.length <= 1) return referencia;
 
-  const cabeceras = lineas[0].split(',').map((c) => c.trim().toLowerCase());
-  for (let i = 1; i < lineas.length; i++) {
-    const valores = lineas[i].split(',').map((v) => v.trim());
+  const cabeceras = filas[0].map((c) => c.toLowerCase());
+  for (let i = 1; i < filas.length; i++) {
+    const valores = filas[i];
     const fila = {};
     cabeceras.forEach((c, idx) => {
       fila[c] = valores[idx] ?? '';
