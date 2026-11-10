@@ -10,7 +10,8 @@ import {
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
-import { CampoEsperado, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
+import { construirContextoDesdeReportes } from '../ia-extractor/normalizacion';
+import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
 import { CAMPOS_FORMULARIO } from './campos-formulario';
 import {
@@ -193,12 +194,19 @@ export class EscaneosService {
     }
 
     try {
-      // 6. Lectura con el modelo, página por página, y fusión de resultados
+      // 6. Lectura con el modelo, página por página, inyectando el contexto de correcciones aprendidas
+      const contexto = await this.obtenerContextoAprendido(empresaId);
       const lecturas: ResultadoLectura[] = [];
       for (const [indice, pagina] of imagenesPaginas.entries()) {
         const copiaIA = await optimizarParaIA(pagina);
         try {
-          const lecturaPagina = await lector.leer(copiaIA.buffer, copiaIA.mimetype, this.camposFormulario);
+          const lecturaPagina = await lector.leer(
+            copiaIA.buffer,
+            copiaIA.mimetype,
+            this.camposFormulario,
+            0.1,
+            contexto,
+          );
           // La caja del modelo es relativa a la imagen de ESTA página: se anota cuál es
           for (const campo of lecturaPagina.campos) {
             if (campo.caja) campo.caja.pagina = indice + 1;
@@ -321,6 +329,30 @@ export class EscaneosService {
     } catch (err: any) {
       this.logger.error(`Proveedor de IA no disponible: ${err?.message}`);
       throw new LecturaIAError(err?.message ?? 'proveedor no configurado');
+    }
+  }
+
+  /**
+   * Consulta las últimas correcciones y valores validados en `reportes` para que el modelo
+   * aprenda de las ediciones hechas en la bandeja de revisión. Si la consulta falla o no hay
+   * historial, devuelve el vocabulario semilla del taller sin interrumpir el flujo.
+   */
+  private async obtenerContextoAprendido(empresaId: string): Promise<ContextoAprendizaje> {
+    try {
+      const consulta: any = this.client
+        .from('reportes')
+        .select('cliente, tecnico_asignado, serie_equipo, direccion, campos_extraidos')
+        .eq('empresa_id', empresaId);
+
+      const ordenada = typeof consulta.order === 'function'
+        ? consulta.order('actualizado_en', { ascending: false })
+        : consulta;
+      const limitada = typeof ordenada.limit === 'function' ? ordenada.limit(50) : ordenada;
+      const res = await limitada;
+      const filas = Array.isArray(res?.data) ? res.data : [];
+      return construirContextoDesdeReportes(filas);
+    } catch {
+      return construirContextoDesdeReportes([]);
     }
   }
 

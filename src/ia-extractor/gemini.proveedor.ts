@@ -3,11 +3,17 @@ import {
   CampoEsperado,
   CampoLeido,
   Confianza,
+  ContextoAprendizaje,
   LectorDeReportes,
   ProveedorIaError,
   ResultadoLectura,
 } from './types';
-import { OBSERVACION_EN_BLANCO, casillaMarcada, esCampoEnBlanco } from './normalizacion';
+import {
+  OBSERVACION_EN_BLANCO,
+  aplicarCorreccionesAprendidas,
+  casillaMarcada,
+  esCampoEnBlanco,
+} from './normalizacion';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -47,6 +53,7 @@ export class GeminiLector implements LectorDeReportes {
     mimeType: string,
     campos: CampoEsperado[],
     temperatura = 0.1,
+    contexto?: ContextoAprendizaje,
   ): Promise<ResultadoLectura> {
     if (!imagen || imagen.length === 0) {
       throw new ProveedorIaError('gemini', 'El buffer de la imagen está vacío');
@@ -56,7 +63,7 @@ export class GeminiLector implements LectorDeReportes {
     }
 
     const inicio = Date.now();
-    const promptSistema = this.construirPrompt(campos);
+    const promptSistema = this.construirPrompt(campos, contexto);
     const base64Imagen = imagen.toString('base64');
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelo}:generateContent?key=${this.apiKey}`;
 
@@ -101,7 +108,10 @@ export class GeminiLector implements LectorDeReportes {
       throw new ProveedorIaError('gemini', `JSON inválido retornado por Gemini: ${rawText}`);
     }
 
-    const camposLeidos = this.normalizarCampos(parsed.campos || {}, campos);
+    const camposLeidos = aplicarCorreccionesAprendidas(
+      this.normalizarCampos(parsed.campos || {}, campos),
+      contexto,
+    );
 
     return {
       numeroReporte: parsed.numero_reporte ? String(parsed.numero_reporte).trim() : null,
@@ -247,36 +257,65 @@ export class GeminiLector implements LectorDeReportes {
     return Number((costoIn + costoOut).toFixed(6));
   }
 
-  private construirPrompt(campos: CampoEsperado[]): string {
+  private construirPrompt(campos: CampoEsperado[], contexto?: ContextoAprendizaje): string {
+    const lineasContexto: string[] = [];
+    if (contexto?.correcciones && contexto.correcciones.length > 0) {
+      const lista = contexto.correcciones
+        .map((c) => `  * En "${c.campo}": no confundir "${c.valorErroneo}" -> lo correcto es "${c.valorCorregido}"`)
+        .join('\n');
+      lineasContexto.push(`CORRECCIONES APRENDIDAS DE REPORTES ANTERIORES:\n${lista}`);
+    }
+    if (contexto?.valoresConocidos && Object.keys(contexto.valoresConocidos).length > 0) {
+      const lista = Object.entries(contexto.valoresConocidos)
+        .filter(([, vals]) => vals && vals.length > 0)
+        .map(([campo, vals]) => `  * ${campo}: ${vals.join(', ')}`)
+        .join('\n');
+      if (lista) {
+        lineasContexto.push(
+          `VOCABULARIO REAL DEL TALLER (úsalo SOLO para desempatar letras manuscritas dudosas cuando SÍ haya tinta escrita en el campo; NUNCA para rellenar campos en blanco):\n${lista}`,
+        );
+      }
+    }
+    const bloqueContexto = lineasContexto.length > 0 ? `\n\n${lineasContexto.join('\n\n')}` : '';
+
     return `Eres un sistema especializado en extracción y lectura de reportes técnicos de servicio industrial manuscritos (escritos a mano).
 
-Tu única tarea es transcribir fielmente los campos visibles en el reporte físico escaneado.
+Tu única tarea es inspeccionar visualmente TODOS los campos del formulario físico escaneado y transcribir fielmente todo lo que tenga tinta manuscrita (azul o negra).
 
 REGLAS OBLIGATORIAS (Guía SIREP):
-1. NUNCA inventes, completes ni supongas datos que no estén escritos.
-2. Si un campo no se lee claramente o está vacío, devuelve valor: null y noLeido: true.
-3. Evalúa tu confianza rigurosamente por campo:
-   - "alta": La letra es legible sin ninguna ambigüedad.
+1. ESCANEO COMPLETO DE TINTA (AZUL O NEGRA):
+   - Revisa visualmente CADA UNO de los campos solicitados (incluyendo teléfono, contacto, equipo, revisión inicial, repuestos, horas y firmas).
+   - SIEMPRE que un campo tenga tinta escrita o marcada (letras, números, checks ✓/X o firmas en lapicero azul o negro), DEBES incluirlo y transcribirlo en "campos".
+   - NUNCA inventes, completes ni supongas datos donde no haya tinta.
+2. AHORRO DE TOKENS EN ESPACIOS EN BLANCO:
+   - Si en ESTE documento un campo con "opcional": true está completamente en blanco en el papel (sin nada de tinta escrita ni casilla marcada), OMÍTELO del objeto "campos" (no lo escribas en el JSON) o devuelve {"vacio": true}.
+   - Si SÍ hay tinta escrita o un tachón en el campo pero no logras leerlo, NO lo omitas: inclúyelo con valor: null, "vacio": false, "noLeido": true y "dudoso": true.
+3. Evalúa tu confianza rigurosamente por campo con tinta:
+   - "alta": La letra o marca es legible sin ninguna ambigüedad.
    - "media": Se entiende por contexto pero algún carácter o número es dudoso.
    - "baja": Muy difícil de descifrar o incompleto. Marca dudoso: true.
-4. Para casillas de verificación (tipo "casilla"): si está marcada devuelve true; una casilla sin marca es valor: null, no false. Si hay marca ambigua, confianza "baja".
-   Para campos tipo "opcion" devuelve el TEXTO exacto de la casilla marcada entre "opciones" (ej. "Limpio"); si no hay ninguna marcada, valor: null; si hay dos marcadas, ambas separadas por " / " y confianza "media".
-   Para firmas devuelve true si hay una firma manuscrita sobre la línea y valor: null si la línea está vacía.
-5. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
-6. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
-7. Para CADA campo devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000, medidos sobre la IMAGEN COMPLETA que recibes (0,0 = esquina superior izquierda de la imagen, no de la hoja; la hoja puede estar desplazada, recortada o inclinada).
-   - Encierra únicamente el espacio donde se escribe el valor (la línea o recuadro con la letra manuscrita), NO la etiqueta impresa como "EMPRESA:" o "FECHA:".
-   - Si el campo está vacío, encierra su recuadro o línea vacía.
-   - En textos largos (procedimiento, conclusión, recomendaciones) encierra todo el recuadro de escritura.
-   - Si no logras ubicar el campo, usa null.
-   - Localiza cada campo por la etiqueta impresa que lo acompaña en ESTA imagen; no asumas posiciones de otros reportes.
-8. En "observacion" escribe, en español y en una frase corta, QUÉ te hizo dudar (ej. "la segunda letra parece una o o una a", "el último dígito se confunde entre 3 y 8", "casilla sin marca clara"). Si la confianza es "alta", déjala vacía.
-9. Cada campo trae "opcional": true o false. Si es opcional y el espacio está completamente en blanco en el papel (nadie escribió ni marcó nada), devuelve valor: null y "vacio": true. Si hay algo escrito o marcado pero no logras leerlo, devuelve "vacio": false y noLeido: true. Nunca pongas "vacio": true en un campo donde veas tinta.
+4. POSICIÓN EXACTA DE CASILLAS EN EL FORMULARIO GO SERVICE LATAM:
+   - En REVISION INICIAL y REPUESTOS REQUERIDOS, cada casilla cuadrada [ ] está impresa inmediatamente a la DERECHA de su texto:
+     * ESTADO DEL EQUIPO: Operativo [ ]   Inoperativo [ ]
+     * LIMPIEZA DEL EQUIPO: Limpio [ ]   Sucio [ ]
+     * CABEZALES: Bueno [ ]   Regular [ ]   Malo [ ]
+     * SIST. DE PROTECCION: Estab. [ ]   UPS [ ]   [recuadro de texto]
+   - Verifica dentro de cuál cuadrado exacto está trazado el check (✓ o X). No confundas una marca dentro de la casilla de "Limpio [✓]" con la palabra "Sucio" que está a su derecha.
+   - Para campos tipo "casilla": si está marcada devuelve true; si no tiene marca, omítelo (o valor: null).
+   - Para campos tipo "opcion": devuelve el TEXTO exacto de la opción cuya casilla derecha está marcada (ej. "Limpio"); si ninguna está marcada, omítelo.
+   - Para "sistema_proteccion": revisa tanto las casillas "Estab." y "UPS" como el recuadro de al lado (si la casilla "Estab." está marcada, devuelve "Estab.").
+   - Para firmas ("firma_operador", "firma_cliente"): devuelve true si hay firma o rúbrica en tinta sobre la línea; si la línea está vacía, omítelo.
+5. COHERENCIA EN HORAS ("hora_llegada" y "hora_salida"):
+   - Lee con cuidado los dígitos manuscritos (ej. no confundir un "5" de trazo cerrado con un "8"). Verifica que "hora_salida" sea coherente con "hora_llegada" dentro de la jornada.
+6. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
+7. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
+8. Para cada campo con tinta que incluyas en "campos", devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000 medidos sobre la IMAGEN COMPLETA (encerrando solo el área con el valor manuscrito, no la etiqueta impresa).
+9. En "observacion" escribe una frase corta en español SOLO cuando la confianza sea "media" o "baja" explicando qué letra o dígito generó duda. Si la confianza es "alta", omite "observacion" o déjala vacía.${bloqueContexto}
 
 CAMPOS SOLICITADOS:
 ${JSON.stringify(campos)}
 
-Responde ESTRICTAMENTE con un objeto JSON:
+Responde ESTRICTAMENTE con un objeto JSON (omitiendo de "campos" los opcionales que estén completamente en blanco sin tinta en este papel):
 {
   "numero_reporte": "000845" o null,
   "campos": {

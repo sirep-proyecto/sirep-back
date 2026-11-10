@@ -2,11 +2,17 @@ import {
   CampoEsperado,
   CampoLeido,
   Confianza,
+  ContextoAprendizaje,
   LectorDeReportes,
   ProveedorIaError,
   ResultadoLectura,
 } from './types';
-import { OBSERVACION_EN_BLANCO, casillaMarcada, esCampoEnBlanco } from './normalizacion';
+import {
+  OBSERVACION_EN_BLANCO,
+  aplicarCorreccionesAprendidas,
+  casillaMarcada,
+  esCampoEnBlanco,
+} from './normalizacion';
 
 export interface OpenAIConfig {
   apiKey: string;
@@ -34,6 +40,7 @@ export class OpenAILector implements LectorDeReportes {
     mimeType: string,
     campos: CampoEsperado[],
     temperatura = 0.1,
+    contexto?: ContextoAprendizaje,
   ): Promise<ResultadoLectura> {
     if (!imagen || imagen.length === 0) {
       throw new ProveedorIaError('openai', 'El buffer de la imagen está vacío');
@@ -117,7 +124,10 @@ export class OpenAILector implements LectorDeReportes {
       throw new ProveedorIaError('openai', `JSON inválido retornado por OpenAI: ${rawContent}`);
     }
 
-    const camposLeidos = this.normalizarCampos(parsed.campos || {}, campos);
+    const camposLeidos = aplicarCorreccionesAprendidas(
+      this.normalizarCampos(parsed.campos || {}, campos),
+      contexto,
+    );
 
     return {
       numeroReporte: parsed.numero_reporte ? String(parsed.numero_reporte).trim() : null,

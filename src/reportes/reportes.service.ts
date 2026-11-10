@@ -19,6 +19,7 @@ import {
   FilaReporte,
   RevisionCampo,
   aReporteContrato,
+  campoRequiereRevision,
   construirCampos,
   derivarEstado,
   valorVigente,
@@ -80,8 +81,10 @@ export class ReportesService {
     const pendiente = actual.estado_revision === 'pendiente';
 
     if (accion.tipo === 'reabrir') {
-      if (pendiente) throw new ConflictException(`El campo "${campoId}" no está resuelto.`);
-    } else if (!pendiente) {
+      if (pendiente || actual.estado_revision === 'auto') {
+        throw new ConflictException(`El campo "${campoId}" no está resuelto.`);
+      }
+    } else if (accion.tipo === 'confirmar' && !pendiente) {
       throw new ConflictException(`El campo "${campoId}" no está pendiente de revisión.`);
     }
 
@@ -91,7 +94,6 @@ export class ReportesService {
     }
 
     const ahora = new Date().toISOString();
-    const revision = this.aplicarAccion(accion, valorNuevo, ahora);
     const base: CampoGuardado = guardados[campoId] ?? {
       clave: campoId,
       valor: null,
@@ -99,6 +101,7 @@ export class ReportesService {
       noLeido: true,
       dudoso: true,
     };
+    const revision = this.aplicarAccion(accion, valorNuevo, ahora, base);
     guardados[campoId] = { ...base, revision };
 
     const camposNuevos = construirCampos(guardados);
@@ -145,9 +148,15 @@ export class ReportesService {
     return this.obtener(numero);
   }
 
-  private aplicarAccion(accion: AccionRevisionDto, valor: string, ahora: string): RevisionCampo {
+  private aplicarAccion(
+    accion: AccionRevisionDto,
+    valor: string,
+    ahora: string,
+    base: CampoGuardado,
+  ): RevisionCampo {
+    const estadoAlReabrir = campoRequiereRevision(base) ? 'pendiente' : 'auto';
     const vacia: RevisionCampo = {
-      estado: 'pendiente',
+      estado: estadoAlReabrir,
       valor_corregido: null,
       revisado_por: null,
       revisado_en: null,

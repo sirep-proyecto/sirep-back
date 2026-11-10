@@ -22,8 +22,8 @@ export const CAMPOS_FORMULARIO: readonly CampoEsperado[] = [
   { clave: 'telefono', tipo: 'texto', opcional: true, descripcion: 'Teléfono del cliente (casillero TELF)' },
   { clave: 'direccion', tipo: 'texto', descripcion: 'Dirección de la empresa' },
   { clave: 'contacto', tipo: 'texto', opcional: true, descripcion: 'Persona de contacto en el cliente (casillero CONTACTO)' },
-  { clave: 'equipo', tipo: 'texto', descripcion: 'Modelo y marca del equipo técnico' },
-  { clave: 'motivo', tipo: 'texto', descripcion: 'Motivo de la orden de servicio' },
+  { clave: 'equipo', tipo: 'texto', opcional: true, descripcion: 'Modelo y marca del equipo técnico' },
+  { clave: 'motivo', tipo: 'texto', opcional: true, descripcion: 'Motivo de la orden de servicio' },
 
   // Revisión inicial
   { clave: 'estado_del_equipo', tipo: 'opcion', opcional: true, opciones: ['Operativo', 'Inoperativo'], descripcion: 'Casilla marcada en ESTADO DEL EQUIPO' },
@@ -39,12 +39,12 @@ export const CAMPOS_FORMULARIO: readonly CampoEsperado[] = [
 
   // Servicio realizado
   { clave: 'procedimiento', tipo: 'texto', descripcion: 'Descripción detallada del trabajo realizado' },
-  { clave: 'conclusion', tipo: 'texto', descripcion: 'Conclusión técnica final' },
+  { clave: 'conclusion', tipo: 'texto', opcional: true, descripcion: 'Conclusión técnica final' },
   { clave: 'recomendaciones', tipo: 'texto', opcional: true, descripcion: 'Recomendaciones para el cliente' },
 
   // Repuestos requeridos
   { clave: 'repuestos_tipo', tipo: 'opcion', opcional: true, opciones: ['Venta', 'Descarte', 'Garantía'], descripcion: 'Casilla marcada en REPUESTOS REQUERIDOS' },
-  { clave: 'codigo_repuesto', tipo: 'texto', descripcion: 'Código o número de parte de repuestos usados (columna CODIGO; una línea por fila de la tabla)' },
+  { clave: 'codigo_repuesto', tipo: 'texto', opcional: true, descripcion: 'Código o número de parte de repuestos usados (columna CODIGO; una línea por fila de la tabla)' },
   { clave: 'repuestos_descripcion', tipo: 'texto', opcional: true, descripcion: 'Columna DESCRIPCION de la tabla de repuestos (una línea por fila)' },
   { clave: 'repuestos_cantidad', tipo: 'texto', opcional: true, descripcion: 'Columna CANT de la tabla de repuestos (una línea por fila)' },
 

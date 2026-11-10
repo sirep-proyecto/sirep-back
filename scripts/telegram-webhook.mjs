@@ -7,6 +7,14 @@
 // Lee TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET y PUBLIC_URL del .env (ver package.json: --env-file).
 // Existe como script porque la regla del proyecto es que nada dependa de pasos hechos a mano.
 
+import dns from 'node:dns';
+import net from 'node:net';
+
+dns.setDefaultResultOrder('ipv4first');
+if (typeof net.setDefaultAutoSelectFamilyAttemptTimeout === 'function') {
+    net.setDefaultAutoSelectFamilyAttemptTimeout(5000);
+}
+
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
 const accion = process.argv[2];

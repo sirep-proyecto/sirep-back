@@ -1,8 +1,17 @@
+import * as dns from 'node:dns';
+import * as net from 'node:net';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { corsOriginCallback } from './common/cors.util';
+
+// Prioriza IPv4 y amplía el timeout de Happy Eyeballs de Node (por defecto 250ms),
+// evitando fallos "fetch failed (ETIMEDOUT)" hacia api.telegram.org desde Sudamérica o redes sin IPv6.
+dns.setDefaultResultOrder('ipv4first');
+if (typeof net.setDefaultAutoSelectFamilyAttemptTimeout === 'function') {
+  net.setDefaultAutoSelectFamilyAttemptTimeout(5000);
+}
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);

@@ -1,4 +1,4 @@
-import { CampoEsperado } from './types';
+import { CampoEsperado, CampoLeido, ContextoAprendizaje, CorreccionAprendida } from './types';
 
 /** Texto que se guarda como observación cuando un campo opcional está en blanco en el papel. */
 export const OBSERVACION_EN_BLANCO = 'En blanco en el papel';
@@ -15,13 +15,144 @@ export function casillaMarcada(valor: unknown): boolean {
 }
 
 /**
- * Un campo opcional que el modelo declara en blanco ("vacio": true) no es un fallo de lectura:
- * el papel simplemente no lo trae (teléfono, tinta, casillas sin marcar...). Si no se distingue,
- * la bandeja se llena de "no leído" que no hay nada que corregir.
+ * Un campo opcional que el modelo declara en blanco ("vacio": true) o que omite del JSON por no
+ * tener tinta en el papel no es un fallo de lectura: el papel simplemente no lo trae.
+ * Si el modelo indica explícitamente que sí había tinta pero no pudo leerla (noLeido: true o vacio: false),
+ * entonces NO está en blanco y debe pasar a revisión.
  */
 export function esCampoEnBlanco(esperado: CampoEsperado, extraido: any): boolean {
-  const sinValor = extraido?.valor === undefined || extraido?.valor === null || extraido?.valor === '';
-  return esperado.opcional === true && sinValor && extraido?.vacio === true;
+  if (esperado.opcional !== true) return false;
+  if (extraido === undefined || extraido === null) return true;
+  const sinValor = extraido.valor === undefined || extraido.valor === null || extraido.valor === '';
+  if (!sinValor) return false;
+  if (extraido.vacio === false || extraido.noLeido === true) return false;
+  return true;
+}
+
+/**
+ * Campos de texto corto / entidades donde una corrección previa exacta (ej. "Absegu" -> "Abregu",
+ * "UV DTE" -> "UV DTF") se puede aplicar automáticamente si el modelo vuelve a cometer el mismo error.
+ */
+const CAMPOS_AUTOCORREGIBLES = new Set([
+  'tecnico',
+  'empresa',
+  'direccion',
+  'contacto',
+  'equipo',
+  'operador',
+  'tinta',
+  'sistema_proteccion',
+]);
+
+/**
+ * Aplica las correcciones aprendidas de revisiones humanas anteriores sobre los campos leídos.
+ * Solo actúa cuando el campo tiene un texto leído que coincide exactamente (ignorando mayúsculas/espacios)
+ * con un `valorErroneo` corregido previamente para ese mismo campo. Nunca rellena campos en blanco.
+ */
+export function aplicarCorreccionesAprendidas(
+  campos: CampoLeido[],
+  contexto?: ContextoAprendizaje,
+): CampoLeido[] {
+  const correcciones = contexto?.correcciones;
+  if (!correcciones || correcciones.length === 0) return campos;
+
+  return campos.map((campo) => {
+    if (
+      campo.noLeido ||
+      typeof campo.valor !== 'string' ||
+      !campo.valor.trim() ||
+      !CAMPOS_AUTOCORREGIBLES.has(campo.clave)
+    ) {
+      return campo;
+    }
+
+    const valorNorm = normalizarTexto(campo.valor);
+    const coincidencia = correcciones.find(
+      (c) => c.campo === campo.clave && normalizarTexto(c.valorErroneo) === valorNorm,
+    );
+    if (!coincidencia) return campo;
+
+    return {
+      ...campo,
+      valor: coincidencia.valorCorregido,
+    };
+  });
+}
+
+/**
+ * Extrae correcciones aprendidas y vocabulario conocido a partir de filas históricas de `reportes`.
+ * Combina una semilla base del taller GO Service Latam con las correcciones reales hechas en la bandeja.
+ */
+export function construirContextoDesdeReportes(
+  filas: Array<{
+    cliente?: string | null;
+    tecnico_asignado?: string | null;
+    serie_equipo?: string | null;
+    direccion?: string | null;
+    campos_extraidos?: Record<string, any> | null;
+  }> = [],
+): ContextoAprendizaje {
+  const mapaCorrecciones = new Map<string, CorreccionAprendida>();
+  const conjuntos: Record<string, Set<string>> = {
+    empresa: new Set(['Abregu', 'Abregu Print', 'Cecely']),
+    tecnico: new Set(['Orlando', 'Antony', 'Antony Yaranga', 'Carlos']),
+    equipo: new Set(['UV DTF', 'Plotter DTF UV', 'Plotter DTF', 'UV Cama plana', 'Subli 3H', 'DTF 60cm']),
+    contacto: new Set(['Vladimir', 'Julio']),
+    operador: new Set(['Fiorella', 'Zamir', 'Adriana', 'Alexander']),
+  };
+
+  const agregarValorConocido = (campo: string, valor: unknown) => {
+    if (typeof valor !== 'string') return;
+    const limpio = valor.trim();
+    if (!limpio || limpio.length > 60) return;
+    if (!conjuntos[campo]) conjuntos[campo] = new Set();
+    if (conjuntos[campo].size < 25) {
+      conjuntos[campo].add(limpio);
+    }
+  };
+
+  for (const fila of filas) {
+    agregarValorConocido('empresa', fila.cliente);
+    agregarValorConocido('tecnico', fila.tecnico_asignado);
+    agregarValorConocido('equipo', fila.serie_equipo);
+
+    const extraidos = fila.campos_extraidos;
+    if (!extraidos || typeof extraidos !== 'object') continue;
+
+    for (const [clave, datos] of Object.entries(extraidos)) {
+      if (!datos || typeof datos !== 'object') continue;
+      const rev = datos.revision;
+      if (rev?.estado === 'corregido' && typeof rev.valor_corregido === 'string') {
+        const corregido = rev.valor_corregido.trim();
+        if (corregido) {
+          agregarValorConocido(clave, corregido);
+          const original = typeof datos.valor === 'string' ? datos.valor.trim() : '';
+          if (original && normalizarTexto(original) !== normalizarTexto(corregido)) {
+            const llave = `${clave}:${normalizarTexto(original)}`;
+            if (!mapaCorrecciones.has(llave) && mapaCorrecciones.size < 40) {
+              mapaCorrecciones.set(llave, {
+                campo: clave,
+                valorErroneo: original,
+                valorCorregido: corregido,
+              });
+            }
+          }
+        }
+      } else if (rev?.estado === 'confirmado' && typeof datos.valor === 'string') {
+        agregarValorConocido(clave, datos.valor);
+      }
+    }
+  }
+
+  const valoresConocidos: Record<string, string[]> = {};
+  for (const [clave, set] of Object.entries(conjuntos)) {
+    if (set.size > 0) valoresConocidos[clave] = Array.from(set);
+  }
+
+  return {
+    correcciones: Array.from(mapaCorrecciones.values()),
+    valoresConocidos,
+  };
 }
 
 /**

@@ -67,6 +67,19 @@ export interface ResultadoLectura {
   salidaCruda?: string;
 }
 
+/** Corrección puntual hecha por un humano sobre una lectura errónea del modelo. */
+export interface CorreccionAprendida {
+  campo: string;
+  valorErroneo: string;
+  valorCorregido: string;
+}
+
+/** Contexto histórico de correcciones y entidades reales para guiar futuras lecturas. */
+export interface ContextoAprendizaje {
+  correcciones?: CorreccionAprendida[];
+  valoresConocidos?: Record<string, string[]>;
+}
+
 /** Interfaz unificada para los lectores de IA intercambiables */
 export interface LectorDeReportes {
   readonly nombre: string;
@@ -76,6 +89,7 @@ export interface LectorDeReportes {
     mimeType: string,
     campos: CampoEsperado[],
     temperatura?: number,
+    contexto?: ContextoAprendizaje,
   ): Promise<ResultadoLectura>;
 }
 

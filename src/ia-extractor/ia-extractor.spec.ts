@@ -285,4 +285,31 @@ describe('Campos opcionales, opciones y casillas', () => {
     const por = await leer({ facturado: { valor: 'Sí', confianza: 'alta' } });
     expect(por.facturado.valor).toBe(true);
   });
+
+  it('un campo opcional omitido del JSON por estar en blanco en el papel se marca en blanco sin gastar tokens', async () => {
+    const por = await leer({ empresa: { valor: 'Abregu', confianza: 'alta' } });
+    expect(por.telefono).toMatchObject({ valor: null, noLeido: false, dudoso: false, confianza: 'alta' });
+    expect(por.empresa.valor).toBe('Abregu');
+  });
+
+  it('aplica las correcciones aprendidas ("Absegu" -> "Abregu") e inyecta el contexto en el prompt', async () => {
+    const mockFetch = respuesta({
+      empresa: { valor: 'Absegu', confianza: 'alta' },
+      telefono: { valor: '943116468', confianza: 'alta' },
+    });
+    const lector = new GeminiLector({ apiKey: 'k', fetchFn: mockFetch });
+    const res = await lector.leer(Buffer.from('x'), 'image/jpeg', campos, 0.1, {
+      correcciones: [{ campo: 'empresa', valorErroneo: 'Absegu', valorCorregido: 'Abregu' }],
+      valoresConocidos: { empresa: ['Abregu'], equipo: ['UV DTF'] },
+    });
+
+    const por = Object.fromEntries(res.campos.map((c) => [c.clave, c]));
+    expect(por.empresa.valor).toBe('Abregu');
+    expect(por.telefono.valor).toBe('943116468');
+
+    const bodyEnviado = JSON.parse(mockFetch.mock.calls[0][1].body);
+    const promptTexto = bodyEnviado.contents[0].parts[0].text as string;
+    expect(promptTexto).toContain('CORRECCIONES APRENDIDAS');
+    expect(promptTexto).toContain('"Absegu" -> lo correcto es "Abregu"');
+  });
 });

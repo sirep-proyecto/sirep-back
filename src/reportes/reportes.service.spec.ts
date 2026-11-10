@@ -179,11 +179,19 @@ describe('ReportesService', () => {
       expect(actualizaciones.find((a) => a.tabla === 'escaneos')!.datos).toEqual({ estado: 'en_revision' });
     });
 
-    it('no permite revisar un campo que no está pendiente', async () => {
+    it('no permite confirmar un campo que no está pendiente, pero sí permite corregirlo si el modelo se equivocó con confianza alta', async () => {
       await expect(
         service.revisarCampo('000214', 'empresa', { tipo: 'confirmar', actor: 'Ana' }),
       ).rejects.toBeInstanceOf(ConflictException);
       expect(actualizaciones).toHaveLength(0);
+
+      await service.revisarCampo('000214', 'empresa', { tipo: 'corregir', actor: 'Ana', valor: 'Abregu' });
+      const rep = actualizaciones.find((a) => a.tabla === 'reportes')!;
+      expect(rep.datos.cliente).toBe('Abregu');
+      expect(rep.datos.campos_extraidos.empresa.revision).toMatchObject({
+        estado: 'corregido',
+        valor_corregido: 'Abregu',
+      });
     });
 
     it('no permite reabrir un campo pendiente', async () => {
