@@ -1,5 +1,6 @@
 import { GeminiLector } from './gemini.proveedor';
 import { OpenAILector } from './openai.proveedor';
+import { AnthropicLector } from './anthropic.proveedor';
 import { crearLectorDeReportes } from './ia-extractor.factory';
 import { CampoEsperado, ProveedorIaError } from './types';
 
@@ -223,8 +224,17 @@ describe('Backend 1: Pieza de IA Intercambiable (Guía SIREP pág. 8-10)', () =>
     });
   });
 
-  describe('Factory y Selección de Proveedor', () => {
-    it('conmuta proveedor según IA_PROVEEDOR', () => {
+  describe('Factory y Selección de Proveedor (SIREP-S3-T16)', () => {
+    afterEach(() => {
+      delete process.env.IA_PROVEEDOR;
+      delete process.env.IA_MODELO;
+      delete process.env.IA_TEMPERATURA;
+      delete process.env.IA_PROMPT;
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_MODEL;
+    });
+
+    it('conmuta proveedor según IA_PROVEEDOR entre gemini, openai y anthropic (claude)', () => {
       process.env.IA_PROVEEDOR = 'gemini';
       process.env.GEMINI_API_KEY = 'key-gemini';
       const l1 = crearLectorDeReportes();
@@ -234,6 +244,62 @@ describe('Backend 1: Pieza de IA Intercambiable (Guía SIREP pág. 8-10)', () =>
       process.env.OPENAI_API_KEY = 'key-openai';
       const l2 = crearLectorDeReportes();
       expect(l2.nombre).toBe('openai');
+
+      process.env.IA_PROVEEDOR = 'anthropic';
+      process.env.ANTHROPIC_API_KEY = 'key-anthropic';
+      const l3 = crearLectorDeReportes();
+      expect(l3.nombre).toBe('anthropic');
+
+      process.env.IA_PROVEEDOR = 'claude';
+      process.env.IA_MODELO = 'claude-3-7-sonnet-20250219';
+      const l4 = crearLectorDeReportes();
+      expect(l4.nombre).toBe('anthropic');
+      expect(l4.modelo).toBe('claude-3-7-sonnet-20250219');
+    });
+
+    it('procesa un reporte con AnthropicLector (Claude) y permite configurar temperatura y prompt sin tocar código', async () => {
+      process.env.IA_TEMPERATURA = '0.25';
+      process.env.IA_PROMPT = 'Prioriza números de serie de cabezales industriales.';
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                numero_reporte: '000845',
+                campos: {
+                  tecnico: { valor: 'Carlos', confianza: 'alta', noLeido: false, dudoso: false },
+                  empresa: { valor: 'Minera Los Andes', confianza: 'alta', noLeido: false, dudoso: false },
+                  fecha: { valor: '2026-11-02', confianza: 'alta', noLeido: false, dudoso: false },
+                  procedimiento: { valor: 'Cambio de filtro', confianza: 'alta', noLeido: false, dudoso: false },
+                  codigo_repuesto: { valor: 'FLT-90', confianza: 'media', noLeido: false, dudoso: false },
+                  estado_del_equipo: { valor: true, confianza: 'alta', noLeido: false, dudoso: false },
+                },
+              }),
+            },
+          ],
+          usage: { input_tokens: 1200, output_tokens: 300 },
+        }),
+      } as any);
+
+      const lector = new AnthropicLector({
+        apiKey: 'test-anthropic-key',
+        modelo: 'claude-3-5-sonnet-latest',
+        fetchFn: mockFetch,
+      });
+
+      const resultado = await lector.leer(dummyBuffer, 'image/jpeg', camposEsperados);
+      expect(resultado.numeroReporte).toBe('000845');
+      expect(resultado.uso.proveedor).toBe('anthropic');
+      expect(resultado.uso.tokensEntrada).toBe(1200);
+      expect(resultado.uso.tokensSalida).toBe(300);
+      expect(resultado.uso.costoUsd).toBeGreaterThan(0);
+
+      const payloadEnviado = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(payloadEnviado.temperature).toBe(0.25);
+      expect(payloadEnviado.system).toContain('Prioriza números de serie de cabezales industriales.');
     });
   });
 });
@@ -287,29 +353,29 @@ describe('Campos opcionales, opciones y casillas', () => {
   });
 
   it('un campo opcional omitido del JSON por estar en blanco en el papel se marca en blanco sin gastar tokens', async () => {
-    const por = await leer({ empresa: { valor: 'Abregu', confianza: 'alta' } });
+    const por = await leer({ empresa: { valor: 'Imprenta Sol', confianza: 'alta' } });
     expect(por.telefono).toMatchObject({ valor: null, noLeido: false, dudoso: false, confianza: 'alta' });
-    expect(por.empresa.valor).toBe('Abregu');
+    expect(por.empresa.valor).toBe('Imprenta Sol');
   });
 
-  it('aplica las correcciones aprendidas ("Absegu" -> "Abregu") e inyecta el contexto en el prompt', async () => {
+  it('aplica las correcciones aprendidas ("Imprenta S0l" -> "Imprenta Sol") e inyecta el contexto en el prompt', async () => {
     const mockFetch = respuesta({
-      empresa: { valor: 'Absegu', confianza: 'alta' },
-      telefono: { valor: '943116468', confianza: 'alta' },
+      empresa: { valor: 'Imprenta S0l', confianza: 'alta' },
+      telefono: { valor: '999888777', confianza: 'alta' },
     });
     const lector = new GeminiLector({ apiKey: 'k', fetchFn: mockFetch });
     const res = await lector.leer(Buffer.from('x'), 'image/jpeg', campos, 0.1, {
-      correcciones: [{ campo: 'empresa', valorErroneo: 'Absegu', valorCorregido: 'Abregu' }],
-      valoresConocidos: { empresa: ['Abregu'], equipo: ['UV DTF'] },
+      correcciones: [{ campo: 'empresa', valorErroneo: 'Imprenta S0l', valorCorregido: 'Imprenta Sol' }],
+      valoresConocidos: { empresa: ['Imprenta Sol'], equipo: ['UV DTF'] },
     });
 
     const por = Object.fromEntries(res.campos.map((c) => [c.clave, c]));
-    expect(por.empresa.valor).toBe('Abregu');
-    expect(por.telefono.valor).toBe('943116468');
+    expect(por.empresa.valor).toBe('Imprenta Sol');
+    expect(por.telefono.valor).toBe('999888777');
 
     const bodyEnviado = JSON.parse(mockFetch.mock.calls[0][1].body);
     const promptTexto = bodyEnviado.contents[0].parts[0].text as string;
     expect(promptTexto).toContain('CORRECCIONES APRENDIDAS');
-    expect(promptTexto).toContain('"Absegu" -> lo correcto es "Abregu"');
+    expect(promptTexto).toContain('"Imprenta S0l" -> lo correcto es "Imprenta Sol"');
   });
 });

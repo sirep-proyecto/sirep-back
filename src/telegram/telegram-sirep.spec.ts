@@ -234,4 +234,60 @@ describe('Backend 2: Telegram Webhook y Respuestas', () => {
       expect(escaparHtml('a & b < c > d')).toBe('a &amp; b &lt; c &gt; d');
     });
   });
+
+  describe('SIREP-S3-T03: Control de chats autorizados (David y Valentino)', () => {
+    it('rechaza un chat no autorizado con un aviso y no descarga ni procesa el archivo', async () => {
+      mockConfigService.get.mockImplementation((key: string) => {
+        if (key === 'TELEGRAM_WEBHOOK_SECRET') return 'super-secret-123';
+        if (key === 'TELEGRAM_BOT_TOKEN') return 'fake-bot-token';
+        if (key === 'TELEGRAM_CHATS_AUTORIZADOS') return '1001,1002,david,valentino';
+        return null;
+      });
+
+      await telegramService.handleUpdate({
+        message: {
+          chat: { id: 9999 },
+          from: { username: 'intruso', first_name: 'Desconocido' },
+          message_id: 10,
+          document: { file_id: 'file-123', file_name: '000845.pdf', mime_type: 'application/pdf' },
+        },
+      });
+
+      expect(telegramService.descargarArchivo).not.toHaveBeenCalled();
+      expect(mockEscaneosService.procesarEscaneo).not.toHaveBeenCalled();
+      expect(enviar).toHaveBeenCalledWith(9999, expect.stringContaining('Acceso no autorizado'));
+    });
+
+    it('permite procesar cuando el chat_id o el username está en TELEGRAM_CHATS_AUTORIZADOS', async () => {
+      mockConfigService.get.mockImplementation((key: string) => {
+        if (key === 'TELEGRAM_WEBHOOK_SECRET') return 'super-secret-123';
+        if (key === 'TELEGRAM_BOT_TOKEN') return 'fake-bot-token';
+        if (key === 'TELEGRAM_CHATS_AUTORIZADOS') return '1001, @valentino';
+        return null;
+      });
+      mockEscaneosService.procesarEscaneo.mockResolvedValue(resultadoOk());
+
+      // Caso 1: autorizado por chat_id (1001)
+      await telegramService.handleUpdate({
+        message: {
+          chat: { id: 1001 },
+          from: { username: 'david_op' },
+          message_id: 11,
+          document: { file_id: 'file-123', file_name: '000845.pdf', mime_type: 'application/pdf' },
+        },
+      });
+      expect(mockEscaneosService.procesarEscaneo).toHaveBeenCalledTimes(1);
+
+      // Caso 2: autorizado por username (valentino)
+      await telegramService.handleUpdate({
+        message: {
+          chat: { id: 2002 },
+          from: { username: 'Valentino' },
+          message_id: 12,
+          document: { file_id: 'file-123', file_name: '000845.pdf', mime_type: 'application/pdf' },
+        },
+      });
+      expect(mockEscaneosService.procesarEscaneo).toHaveBeenCalledTimes(2);
+    });
+  });
 });

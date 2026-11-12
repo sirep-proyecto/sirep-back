@@ -6,3 +6,11 @@ dist
 .git
 *.md
 package-lock.json
+muestra
+muestras
+data
+bundles
+*.bundle
+evaluacion_*.csv
+metricas_y_csv
+*.pdf

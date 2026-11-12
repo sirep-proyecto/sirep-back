@@ -48,12 +48,79 @@ export class TelegramService {
     return `https://api.telegram.org/file/bot${this.token}`;
   }
 
+  /**
+   * SIREP-S3-T03: Lista de chats o usuarios autorizados (ej. David y Valentino) leída desde
+   * configuración sin tocar código. Acepta IDs numéricos de chat o usernames separados por coma.
+   */
+  private obtenerChatsAutorizados(): Set<string> | null {
+    const crudo =
+      this.config.get<string>('TELEGRAM_CHATS_AUTORIZADOS') ??
+      this.config.get<string>('TELEGRAM_ALLOWED_CHAT_IDS') ??
+      process.env.TELEGRAM_CHATS_AUTORIZADOS ??
+      process.env.TELEGRAM_ALLOWED_CHAT_IDS;
+
+    if (crudo === undefined || crudo === null) {
+      return null;
+    }
+
+    const limpio = String(crudo).trim();
+    if (!limpio || limpio === '*') {
+      return limpio === '*' ? null : new Set<string>();
+    }
+
+    const entradas = limpio
+      .split(/[,;\s]+/)
+      .map((item) => item.trim().replace(/^@/, '').toLowerCase())
+      .filter(Boolean);
+
+    return new Set(entradas);
+  }
+
+  private esChatAutorizado(chatId: number | string, username?: string, firstName?: string): boolean {
+    const autorizados = this.obtenerChatsAutorizados();
+    if (autorizados === null) {
+      // Si no se definió la variable, en producción se bloquea por defecto (fail-closed);
+      // en pruebas unitarias sin la variable definida se permite continuar.
+      const entorno = this.config.get<string>('NODE_ENV') ?? process.env.NODE_ENV;
+      return entorno !== 'production';
+    }
+
+    if (autorizados.size === 0) {
+      return false;
+    }
+
+    const idStr = String(chatId).trim().toLowerCase();
+    if (autorizados.has(idStr)) return true;
+
+    if (username) {
+      const userNorm = username.trim().replace(/^@/, '').toLowerCase();
+      if (userNorm && autorizados.has(userNorm)) return true;
+    }
+
+    if (firstName) {
+      const nameNorm = firstName.trim().toLowerCase();
+      if (nameNorm && autorizados.has(nameNorm)) return true;
+    }
+
+    return false;
+  }
+
   async handleUpdate(update: TelegramUpdate) {
     const message = update.message;
     if (!message) return;
 
     const chatId = message.chat.id;
     const remitente = message.from?.username || message.from?.first_name || 'telegram_user';
+
+    // 0. SIREP-S3-T03: Verificar que el remitente esté en la lista de chats autorizados
+    if (!this.esChatAutorizado(chatId, message.from?.username, message.from?.first_name)) {
+      this.logger.warn(`Rechazado mensaje de chat no autorizado: chat_id=${chatId}, usuario=${remitente}`);
+      await this.enviarMensaje(
+        chatId,
+        `⛔ <b>Acceso no autorizado.</b>\nEste bot está restringido al personal autorizado de digitalización de SIREP.\n<i>(ID de chat: <code>${escaparHtml(String(chatId))}</code>)</i>`,
+      );
+      return;
+    }
 
     // 1. Verificar si viene un archivo o foto
     const fileId =

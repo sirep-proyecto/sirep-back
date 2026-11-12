@@ -10,6 +10,7 @@ import {
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
+import { resolverTemperaturaConfigurada } from '../ia-extractor/anthropic.proveedor';
 import { construirContextoDesdeReportes, registrarEdicionEnDataset } from '../ia-extractor/normalizacion';
 import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
@@ -196,6 +197,7 @@ export class EscaneosService {
     try {
       // 6. Lectura con el modelo, página por página, inyectando el contexto de correcciones aprendidas
       const contexto = await this.obtenerContextoAprendido(empresaId);
+      const temperaturaConfigurada = resolverTemperaturaConfigurada();
       const lecturas: ResultadoLectura[] = [];
       for (const [indice, pagina] of imagenesPaginas.entries()) {
         const copiaIA = await optimizarParaIA(pagina);
@@ -204,7 +206,7 @@ export class EscaneosService {
             copiaIA.buffer,
             copiaIA.mimetype,
             this.camposFormulario,
-            0.1,
+            temperaturaConfigurada,
             contexto,
           );
           // La caja del modelo es relativa a la imagen de ESTA página: se anota cuál es
@@ -393,6 +395,41 @@ export class EscaneosService {
     } catch {
       // Si la BD original aún no aplicó la migración de `dataset_clientes`, continúa con el JSON portable + `reportes`
       filasDataset = [];
+    }
+
+    // SIREP-S3-T16: Cargar también los clientes conocidos desde la tabla `clientes` de RP-TECH si está presente
+    try {
+      const consultaClientesRpTech: any = this.client
+        .from('clientes')
+        .select('*');
+      const limitadaCli =
+        typeof consultaClientesRpTech?.limit === 'function'
+          ? consultaClientesRpTech.limit(500)
+          : consultaClientesRpTech;
+      const resCli = await limitadaCli;
+      if (Array.isArray(resCli?.data)) {
+        for (const cli of resCli.data) {
+          const nombre =
+            cli?.nombre ||
+            cli?.razon_social ||
+            cli?.nombre_comercial ||
+            cli?.empresa ||
+            cli?.nombre_cliente;
+          if (typeof nombre === 'string' && nombre.trim()) {
+            const dir = cli?.direccion ? [String(cli.direccion).trim()] : [];
+            const cont = cli?.contacto ? [String(cli.contacto).trim()] : [];
+            filasDataset.push({
+              nombre_cliente: nombre.trim(),
+              direcciones: dir,
+              contactos: cont,
+              direccion_por_contacto: {},
+              correcciones: [],
+            });
+          }
+        }
+      }
+    } catch {
+      // Si la tabla `clientes` no existe en el entorno actual, se continúa sin error
     }
 
     return construirContextoDesdeReportes(filasReportes, filasDataset);

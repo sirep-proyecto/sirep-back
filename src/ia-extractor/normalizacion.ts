@@ -43,80 +43,11 @@ export interface DatasetPersistente {
 
 const SEMILLA_DATASET: DatasetPersistente = {
   version: 1,
-  actualizadoEn: '2026-11-11T08:15:00.000Z',
-  clientes: [
-    {
-      nombre: 'Abregu',
-      direcciones: [
-        'Jr. San Cristobal 1656 La Victoria',
-        'Galeria Yuyi 1656 Puerta a calle',
-        'Gutierrez de Noriega 233',
-        'Jr. Ignacio Cossio 1464 La Victoria',
-      ],
-      contactos: ['Vladimir', 'Julio'],
-      direccionPorContacto: {
-        vladimir: 'Gutierrez de Noriega 233',
-        julio: 'Galeria Yuyi 1656 Puerta a calle',
-      },
-    },
-    {
-      nombre: 'Abregu Print',
-      direcciones: ['Galeria Yuyi 1656 Puerta a calle', 'Jr. San Cristobal 1656 La Victoria'],
-      contactos: ['Vladimir', 'Julio'],
-      direccionPorContacto: {
-        vladimir: 'Jr. San Cristobal 1656 La Victoria',
-        julio: 'Galeria Yuyi 1656 Puerta a calle',
-      },
-    },
-    {
-      nombre: 'Cecely',
-      direcciones: ['Galeria Yuyi'],
-      contactos: [],
-      direccionPorContacto: {},
-    },
-  ],
-  contactos: [
-    {
-      nombre: 'Vladimir',
-      empresa: 'Abregu',
-      direccionPrincipal: 'Gutierrez de Noriega 233',
-      direcciones: ['Gutierrez de Noriega 233', 'Jr. San Cristobal 1656 La Victoria'],
-    },
-    {
-      nombre: 'Julio',
-      empresa: 'Abregu',
-      direccionPrincipal: 'Galeria Yuyi 1656 Puerta a calle',
-      direcciones: ['Galeria Yuyi 1656 Puerta a calle'],
-    },
-  ],
-  correcciones: [
-    { campo: 'empresa', valorErroneo: 'Absegu', valorCorregido: 'Abregu' },
-    { campo: 'empresa', valorErroneo: 'Abresv', valorCorregido: 'Abregu' },
-    { campo: 'empresa', valorErroneo: 'Abrosu', valorCorregido: 'Abregu' },
-    { campo: 'empresa', valorErroneo: 'Atrosu', valorCorregido: 'Abregu' },
-    { campo: 'empresa', valorErroneo: 'Alpesu', valorCorregido: 'Abregu' },
-    { campo: 'empresa', valorErroneo: 'Doregio', valorCorregido: 'Abregu' },
-    { campo: 'empresa', valorErroneo: 'Abrego', valorCorregido: 'Abregu' },
-    { campo: 'direccion', valorErroneo: 'YUYA', valorCorregido: 'Galeria Yuyi' },
-    { campo: 'direccion', valorErroneo: 'Galeria yugi', valorCorregido: 'Galeria Yuyi' },
-    { campo: 'direccion', valorErroneo: 'Galeria LiYi - 1656', valorCorregido: 'Galeria Yuyi 1656 Puerta a calle' },
-    { campo: 'direccion', valorErroneo: 'Gutierrez Noriesc', valorCorregido: 'Gutierrez de Noriega 233' },
-  ],
-  valoresConocidos: {
-    empresa: ['Abregu', 'Abregu Print', 'Cecely'],
-    tecnico: ['Orlando', 'Antony', 'Antony Yaranga', 'Carlos', 'Adriana'],
-    equipo: ['UV DTF', 'Plotter DTF UV', 'Plotter DTF', 'UV Cama plana', 'Subli 3H', 'DTF 60cm'],
-    direccion: [
-      'Jr. San Cristobal 1656 La Victoria',
-      'Galeria Yuyi 1656 Puerta a calle',
-      'Gutierrez de Noriega 233',
-      'Jr. Ignacio Cossio 1464 La Victoria',
-      'Galeria Yuyi',
-    ],
-    sistema_proteccion: ['Estab.', 'UPS', 'Ninguno', 'Nada'],
-    contacto: ['Vladimir', 'Julio'],
-    operador: ['Fiorella', 'Zamir', 'Adriana', 'Alexander', 'Ignacio'],
-  },
+  actualizadoEn: '2026-11-12T00:00:00.000Z',
+  clientes: [],
+  contactos: [],
+  correcciones: [],
+  valoresConocidos: {},
 };
 
 function clonarDataset(ds: DatasetPersistente): DatasetPersistente {
@@ -458,7 +389,7 @@ export function esCampoEnBlanco(esperado: CampoEsperado, extraido: any): boolean
 }
 
 /**
- * Campos de texto corto / entidades donde una corrección previa exacta (ej. "Absegu" -> "Abregu",
+ * Campos de texto corto / entidades donde una corrección previa exacta (ej. "Imprenta S0l" -> "Imprenta Sol",
  * "UV DTE" -> "UV DTF") se puede aplicar automáticamente si el modelo vuelve a cometer el mismo error.
  */
 const CAMPOS_AUTOCORREGIBLES = new Set([
@@ -474,7 +405,7 @@ const CAMPOS_AUTOCORREGIBLES = new Set([
 
 /**
  * Busca cuál de las direcciones almacenadas coincide mejor con un fragmento o lectura borrosa
- * (ej. "Yuyi", "San cristobal 168", "Noriega"). Si ninguna coincide, retorna null.
+ * (ej. "Av. Industrial 120", "Taller Norte"). Si ninguna coincide, retorna null.
  */
 function buscarMejorDireccionAlmacenada(fragmento: string, direcciones: string[]): string | null {
   const fragNorm = normalizarTexto(fragmento);
@@ -574,7 +505,7 @@ export function aplicarCorreccionesAprendidas(
   if (!contexto) return campos;
   const correcciones = contexto.correcciones ?? [];
 
-  // 1. Correcciones directas de palabras/OCR (ej. "Absegu" -> "Abregu", "YUYA" -> "Galeria Yuyi")
+  // 1. Correcciones directas de palabras/OCR (ej. "Imprenta S0l" -> "Imprenta Sol")
   const corregidos = campos.map((campo) => {
     if (
       campo.noLeido ||
@@ -672,7 +603,7 @@ export function aplicarCorreccionesAprendidas(
     ];
 
     if (textoDirLeido) {
-      // Si hay un trazo parcial en dirección (ej. "San Cristobal 168" o "Noriega"), desempata entre las direcciones del contacto
+      // Si hay un trazo parcial en dirección, desempata entre las direcciones del contacto
       const coincidenciaParcial = buscarMejorDireccionAlmacenada(textoDirLeido, candidatosContacto);
       if (coincidenciaParcial && (direccionNoSeVeBien || normalizarTexto(coincidenciaParcial) !== normalizarTexto(textoDirLeido))) {
         corregidos[idxDireccion] = {

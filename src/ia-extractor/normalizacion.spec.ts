@@ -114,35 +114,49 @@ describe('SIREP-S2-T07: Reglas de Normalización y Comparación Automática', ()
     });
 
     it('si no se ve bien la dirección (noLeido o baja confianza), usa el nombre en contacto para saber a cuál dirección concurre', () => {
-      const contexto = construirContextoDesdeReportes([]);
+      const contexto = construirContextoDesdeReportes([], [
+        {
+          nombre_cliente: 'Gráfica Central',
+          direcciones: ['Av. Industrial 450', 'Jr. Los Talleres 233'],
+          contactos: ['Roberto'],
+          direccion_por_contacto: { roberto: 'Jr. Los Talleres 233' },
+        },
+      ]);
       const campos = aplicarCorreccionesAprendidas(
         [
-          { clave: 'empresa', valor: 'Abregu', confianza: 'alta', noLeido: false, dudoso: false },
-          { clave: 'contacto', valor: 'Vladimir', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'empresa', valor: 'Gráfica Central', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'contacto', valor: 'Roberto', confianza: 'alta', noLeido: false, dudoso: false },
           { clave: 'direccion', valor: null, confianza: 'baja', noLeido: true, dudoso: true },
         ],
         contexto,
       );
 
       const dir = campos.find((c) => c.clave === 'direccion')!;
-      expect(dir.valor).toBe('Gutierrez de Noriega 233');
+      expect(dir.valor).toBe('Jr. Los Talleres 233');
       expect(dir.noLeido).toBe(false);
       expect(dir.dudoso).toBe(false);
     });
 
-    it('si la dirección se ve borrosa o incompleta ("Av San cristobal 168"), desempata entre las direcciones a las que concurre el contacto', () => {
-      const contexto = construirContextoDesdeReportes([]);
+    it('si la dirección se ve borrosa o incompleta ("Av Industrial 45"), desempata entre las direcciones a las que concurre el contacto', () => {
+      const contexto = construirContextoDesdeReportes([], [
+        {
+          nombre_cliente: 'Gráfica Central',
+          direcciones: ['Av. Industrial 450 Distrito Sur', 'Jr. Los Talleres 233'],
+          contactos: ['Roberto'],
+          direccion_por_contacto: { roberto: 'Jr. Los Talleres 233' },
+        },
+      ]);
       const campos = aplicarCorreccionesAprendidas(
         [
-          { clave: 'empresa', valor: 'Abregu', confianza: 'alta', noLeido: false, dudoso: false },
-          { clave: 'contacto', valor: 'Vladimir', confianza: 'alta', noLeido: false, dudoso: false },
-          { clave: 'direccion', valor: 'Av San cristobal 168', confianza: 'media', noLeido: false, dudoso: true },
+          { clave: 'empresa', valor: 'Gráfica Central', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'contacto', valor: 'Roberto', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'direccion', valor: 'Av Industrial 45', confianza: 'media', noLeido: false, dudoso: true },
         ],
         contexto,
       );
 
       const dir = campos.find((c) => c.clave === 'direccion')!;
-      expect(dir.valor).toBe('Jr. San Cristobal 1656 La Victoria');
+      expect(dir.valor).toBe('Av. Industrial 450 Distrito Sur');
       expect(dir.dudoso).toBe(false);
     });
 
