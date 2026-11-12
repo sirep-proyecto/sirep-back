@@ -185,12 +185,12 @@ describe('ReportesService', () => {
       ).rejects.toBeInstanceOf(ConflictException);
       expect(actualizaciones).toHaveLength(0);
 
-      await service.revisarCampo('000214', 'empresa', { tipo: 'corregir', actor: 'Ana', valor: 'Abregu' });
+      await service.revisarCampo('000214', 'empresa', { tipo: 'corregir', actor: 'Ana', valor: 'Imprenta Sol' });
       const rep = actualizaciones.find((a) => a.tabla === 'reportes')!;
-      expect(rep.datos.cliente).toBe('Abregu');
+      expect(rep.datos.cliente).toBe('Imprenta Sol');
       expect(rep.datos.campos_extraidos.empresa.revision).toMatchObject({
         estado: 'corregido',
-        valor_corregido: 'Abregu',
+        valor_corregido: 'Imprenta Sol',
       });
     });
 
@@ -251,6 +251,49 @@ describe('ReportesService', () => {
         empresa: 'Imprenta Sol',
         direccionPrincipal: 'Av. Wilson 1230 Stand 14',
       });
+    });
+  });
+
+  describe('SIREP-S3-T05: Exportación a Excel (.xlsx y .csv) con campos vitales primero', () => {
+    it('coloca primero los 10 campos vitales y luego el resto de los 31 campos con nombres acordados con RP-TECH', async () => {
+      const expCsv = await service.exportarReportes('csv');
+      expect(expCsv.totalReportes).toBe(1);
+
+      // Primeros 10 encabezados = campos vitales exigidos en el Sprint 3
+      const vitalesEsperados = [
+        'numero_talonario',
+        'fecha',
+        'tecnico_asignado',
+        'cliente',
+        'serie_equipo',
+        'motivo',
+        'procedimiento',
+        'conclusion',
+        'hora_llegada',
+        'hora_salida',
+      ];
+      expect(expCsv.columnas.slice(0, 10)).toEqual(vitalesEsperados);
+      // 1 numero_talonario + 31 campos del formulario + 5 metadatos = 37 columnas
+      expect(expCsv.columnas.length).toBeGreaterThanOrEqual(32);
+
+      // Verifica BOM UTF-8 (\uFEFF) y tildes correctas
+      const textoCsv = expCsv.buffer.toString('utf-8');
+      expect(textoCsv.charCodeAt(0)).toBe(0xfeff);
+      expect(textoCsv).toContain('000214');
+      expect(textoCsv).toContain('valor empresa');
+    });
+
+    it('genera un archivo .xlsx OpenXML válido (cabecera ZIP PK) con tildes y eñes preservadas', async () => {
+      filas[0].campos_extraidos!.procedimiento.valor = 'Calibración de cañón y cigüeñal en 2 máquinas';
+      const expXlsx = await service.exportarReportes('xlsx');
+
+      expect(expXlsx.filename).toMatch(/^reportes_sirep_\d{4}-\d{2}-\d{2}\.xlsx$/);
+      expect(expXlsx.contentType).toBe(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      // Cabecera mágica ZIP (PK\x03\x04) de un archivo .xlsx estándar
+      expect(expXlsx.buffer.subarray(0, 4).toString('binary')).toBe('PK\x03\x04');
+      expect(expXlsx.buffer.length).toBeGreaterThan(500);
     });
   });
 });

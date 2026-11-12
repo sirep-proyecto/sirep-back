@@ -38,18 +38,27 @@ lerna-debug.log*
 .env*
 !.env.example
 
-# SIREP: Escaneos reales de clientes (Regla de oro: nunca se suben al repositorio)
+# SIREP: Escaneos reales y datos de clientes (Regla de oro: nunca se suben al repositorio)
 muestras/
 muestras/*
 muestra/
 **/muestra/
 resultados_json/
 **/resultados_json/
+evaluacion_*.csv
+**/evaluacion_*.csv
+metricas_y_csv/
+**/metricas_y_csv/
+backups/
+**/backups/
+data/
+**/data/
+bundles/
+*.bundle
 *.pdf
 *.jpg
 *.jpeg
 *.png
-*.bundle
 supabase/.temp/
 .temp/
 

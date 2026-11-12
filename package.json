@@ -10,7 +10,8 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
     "test": "jest",
-    "telegram:webhook": "node --env-file=.env scripts/telegram-webhook.mjs"
+    "telegram:webhook": "node --env-file=.env scripts/telegram-webhook.mjs",
+    "db:backup": "node --env-file=.env scripts/backup-diario.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.1.0",

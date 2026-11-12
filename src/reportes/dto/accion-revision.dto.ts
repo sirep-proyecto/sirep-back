@@ -7,11 +7,15 @@ export class AccionRevisionDto {
   @IsIn(TIPOS_ACCION)
   tipo!: TipoAccion;
 
-  /** Quién firma la revisión. Mientras no haya autenticación lo envía la bandeja. */
+  /**
+   * Quién firma la revisión. En producción se toma del usuario autenticado (SIREP-S3-T04);
+   * se mantiene opcional en el cuerpo por compatibilidad con llamadas internas/pruebas.
+   */
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(80)
-  actor!: string;
+  actor?: string;
 
   /** Obligatorio solo al corregir. */
   @IsOptional()

@@ -23,13 +23,16 @@ async function bootstrap() {
   });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
 
-  const config = new DocumentBuilder()
-    .setTitle('SIREP API')
-    .setDescription('Endpoints del backend de SIREP (Digitalización de Reportes Técnicos con IA y Telegram)')
-    .setVersion('1.0')
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
+  if (process.env.NODE_ENV !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('SIREP API')
+      .setDescription('Endpoints del backend de SIREP (Digitalización de Reportes Técnicos con IA y Telegram)')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('docs', app, document);
+  }
 
   const port = process.env.PORT ? Number(process.env.PORT) : 3000;
   await app.listen(port);

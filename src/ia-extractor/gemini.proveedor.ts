@@ -14,10 +14,16 @@ import {
   casillaMarcada,
   esCampoEnBlanco,
 } from './normalizacion';
+import {
+  resolverPromptConfigurado,
+  resolverTemperaturaConfigurada,
+} from './anthropic.proveedor';
 
 export interface GeminiConfig {
   apiKey: string;
   modelo?: string;
+  temperatura?: number;
+  promptPersonalizado?: string;
   fetchFn?: typeof fetch;
   /** Intentos totales ante fallos transitorios del proveedor (por defecto 3). */
   intentosMaximos?: number;
@@ -33,6 +39,8 @@ export class GeminiLector implements LectorDeReportes {
   readonly nombre = 'gemini';
   readonly modelo: string;
   private readonly apiKey: string;
+  private readonly temperaturaBase?: number;
+  private readonly promptPersonalizado?: string;
   private readonly fetchFn: typeof fetch;
   private readonly intentosMaximos: number;
   private readonly esperaBaseMs: number;
@@ -43,6 +51,8 @@ export class GeminiLector implements LectorDeReportes {
     }
     this.apiKey = config.apiKey;
     this.modelo = config.modelo || 'gemini-3.8-flash';
+    this.temperaturaBase = config.temperatura;
+    this.promptPersonalizado = config.promptPersonalizado;
     this.fetchFn = config.fetchFn || globalThis.fetch.bind(globalThis);
     this.intentosMaximos = Math.max(1, config.intentosMaximos ?? 3);
     this.esperaBaseMs = config.esperaBaseMs ?? 2000;
@@ -52,7 +62,7 @@ export class GeminiLector implements LectorDeReportes {
     imagen: Buffer,
     mimeType: string,
     campos: CampoEsperado[],
-    temperatura = 0.1,
+    temperatura?: number,
     contexto?: ContextoAprendizaje,
   ): Promise<ResultadoLectura> {
     if (!imagen || imagen.length === 0) {
@@ -62,6 +72,7 @@ export class GeminiLector implements LectorDeReportes {
       throw new ProveedorIaError('gemini', 'Se requiere al menos un campo esperado');
     }
 
+    const tempEfectiva = resolverTemperaturaConfigurada(temperatura, this.temperaturaBase);
     const inicio = Date.now();
     const promptSistema = this.construirPrompt(campos, contexto);
     const base64Imagen = imagen.toString('base64');
@@ -82,7 +93,7 @@ export class GeminiLector implements LectorDeReportes {
         },
       ],
       generationConfig: {
-        temperature: temperatura,
+        temperature: tempEfectiva,
         response_mime_type: 'application/json',
       },
     };
@@ -304,6 +315,8 @@ export class GeminiLector implements LectorDeReportes {
       }
     }
     const bloqueContexto = lineasContexto.length > 0 ? `\n\n${lineasContexto.join('\n\n')}` : '';
+    const promptConfigurado = resolverPromptConfigurado(this.promptPersonalizado);
+    const bloqueExtraPrompt = promptConfigurado ? `\n\nINSTRUCCIONES DE PROMPT CONFIGURADAS:\n${promptConfigurado}` : '';
 
     return `Eres un sistema especializado en extracción y lectura de reportes técnicos de servicio industrial manuscritos (escritos a mano).
 
@@ -338,7 +351,7 @@ REGLAS OBLIGATORIAS (Guía SIREP):
 6. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
 7. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
 8. Para cada campo con tinta que incluyas en "campos", devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000 medidos sobre la IMAGEN COMPLETA (encerrando solo el área con el valor manuscrito, no la etiqueta impresa).
-9. En "observacion" escribe una frase corta en español SOLO cuando la confianza sea "media" o "baja" explicando qué letra o dígito generó duda. Si la confianza es "alta", omite "observacion" o déjala vacía.${bloqueContexto}
+9. En "observacion" escribe una frase corta en español SOLO cuando la confianza sea "media" o "baja" explicando qué letra o dígito generó duda. Si la confianza es "alta", omite "observacion" o déjala vacía.${bloqueContexto}${bloqueExtraPrompt}
 
 CAMPOS SOLICITADOS:
 ${JSON.stringify(campos)}

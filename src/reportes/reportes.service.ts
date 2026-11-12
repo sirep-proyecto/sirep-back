@@ -20,6 +20,12 @@ import {
 import { AccionRevisionDto } from './dto/accion-revision.dto';
 import { columnasDesdeValores } from './reportes.columnas';
 import {
+  COLUMNAS_EXPORTACION_RPTECH,
+  FilaReporteExportable,
+  generarCsvReportes,
+  generarExcelReportes,
+} from './reportes.excel';
+import {
   CampoGuardado,
   CampoContrato,
   FilaReporte,
@@ -99,6 +105,9 @@ export class ReportesService {
       throw new BadRequestException('La corrección no puede quedar vacía.');
     }
 
+    const actorRevisor = accion.actor?.trim() || 'revisor';
+    const accionConActor: AccionRevisionDto = { ...accion, actor: actorRevisor };
+
     const ahora = new Date().toISOString();
     const base: CampoGuardado = guardados[campoId] ?? {
       clave: campoId,
@@ -107,7 +116,7 @@ export class ReportesService {
       noLeido: true,
       dudoso: true,
     };
-    const revision = this.aplicarAccion(accion, valorNuevo, ahora, base);
+    const revision = this.aplicarAccion(accionConActor, valorNuevo, ahora, base);
     guardados[campoId] = { ...base, revision };
 
     const camposNuevos = construirCampos(guardados);
@@ -124,7 +133,7 @@ export class ReportesService {
         campos_dudosos: pendientes,
         estado_reporte: pendientes.length === 0 ? 'aprobado' : 'pendiente_revision',
         ...columnasDesdeValores(valores),
-        ...(accion.tipo === 'corregir' ? { corregido_por: accion.actor, fecha_correccion: ahora } : {}),
+        ...(accion.tipo === 'corregir' ? { corregido_por: actorRevisor, fecha_correccion: ahora } : {}),
       })
       .eq('id', fila.id)
       // Control de concurrencia: si otra persona guardó en el medio, `actualizado_en` ya cambió y no se pisa su trabajo.
@@ -156,6 +165,54 @@ export class ReportesService {
     this.eventos?.emitirCambio('actualizado', numero);
 
     return this.obtener(numero);
+  }
+
+  /**
+   * SIREP-S3-T05: Exportación a Excel (.xlsx o .csv con BOM UTF-8) con todos los campos,
+   * los 10 vitales primero, y nombres de columna acordados con RP-TECH.
+   */
+  async exportarReportes(formato: 'xlsx' | 'csv' = 'xlsx'): Promise<{
+    buffer: Buffer;
+    contentType: string;
+    filename: string;
+    totalReportes: number;
+    columnas: string[];
+  }> {
+    const { data, error } = await this.client
+      .from('reportes')
+      .select(SELECCION)
+      .eq('empresa_id', EMPRESA_POR_DEFECTO)
+      .order('creado_en', { ascending: false })
+      .limit(2000);
+
+    if (error) {
+      this.logger.error(`No se pudieron exportar los reportes: ${error.message}`);
+      throw new InternalServerErrorException('No se pudieron exportar los reportes.');
+    }
+
+    const filas = (Array.isArray(data) ? data : []) as FilaReporteExportable[];
+    const fechaHoy = new Date().toISOString().slice(0, 10);
+    const columnas = COLUMNAS_EXPORTACION_RPTECH.map((c) => c.columna);
+
+    if (formato === 'csv') {
+      const csv = generarCsvReportes(filas);
+      return {
+        buffer: Buffer.from(csv, 'utf-8'),
+        contentType: 'text/csv; charset=utf-8',
+        filename: `reportes_sirep_${fechaHoy}.csv`,
+        totalReportes: filas.length,
+        columnas,
+      };
+    }
+
+    const xlsx = generarExcelReportes(filas);
+    return {
+      buffer: xlsx,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      filename: `reportes_sirep_${fechaHoy}.xlsx`,
+      totalReportes: filas.length,
+      columnas,
+    };
   }
 
   /**
@@ -251,18 +308,19 @@ export class ReportesService {
       corregido_por: null,
       corregido_en: null,
     };
+    const actor = accion.actor?.trim() || 'revisor';
     switch (accion.tipo) {
       case 'confirmar':
-        return { ...vacia, estado: 'confirmado', revisado_por: accion.actor, revisado_en: ahora };
+        return { ...vacia, estado: 'confirmado', revisado_por: actor, revisado_en: ahora };
       case 'ilegible':
-        return { ...vacia, estado: 'ilegible', revisado_por: accion.actor, revisado_en: ahora };
+        return { ...vacia, estado: 'ilegible', revisado_por: actor, revisado_en: ahora };
       case 'corregir':
         return {
           estado: 'corregido',
           valor_corregido: valor,
-          revisado_por: accion.actor,
+          revisado_por: actor,
           revisado_en: ahora,
-          corregido_por: accion.actor,
+          corregido_por: actor,
           corregido_en: ahora,
         };
       case 'reabrir':

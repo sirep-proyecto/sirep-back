@@ -76,9 +76,9 @@ export interface CorreccionAprendida {
 
 /** Registro de un usuario de contacto (casilla CONTACTO) y los locales donde concurre. */
 export interface ContactoRegistrado {
-  /** Nombre canónico del usuario en la casilla de contacto (ej. "Vladimir", "Julio") */
+  /** Nombre canónico del usuario en la casilla de contacto */
   nombre: string;
-  /** Empresa / cliente al que pertenece (ej. "Abregu") */
+  /** Empresa / cliente al que pertenece */
   empresa?: string | null;
   /** Dirección principal o más reciente del local donde concurre este contacto */
   direccionPrincipal?: string | null;
@@ -90,7 +90,7 @@ export interface ContactoRegistrado {
 
 /** Registro de un cliente (empresa) con las direcciones de sus locales y sus contactos. */
 export interface ClienteRegistrado {
-  /** Nombre canónico del cliente (ej. "Abregu") */
+  /** Nombre canónico del cliente */
   nombre: string;
   /** Direcciones de los locales donde se hicieron boletas para este cliente */
   direcciones: string[];

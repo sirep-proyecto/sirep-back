@@ -13,10 +13,16 @@ import {
   casillaMarcada,
   esCampoEnBlanco,
 } from './normalizacion';
+import {
+  resolverPromptConfigurado,
+  resolverTemperaturaConfigurada,
+} from './anthropic.proveedor';
 
 export interface OpenAIConfig {
   apiKey: string;
   modelo?: string;
+  temperatura?: number;
+  promptPersonalizado?: string;
   fetchFn?: typeof fetch;
 }
 
@@ -24,6 +30,8 @@ export class OpenAILector implements LectorDeReportes {
   readonly nombre = 'openai';
   readonly modelo: string;
   private readonly apiKey: string;
+  private readonly temperaturaBase?: number;
+  private readonly promptPersonalizado?: string;
   private readonly fetchFn: typeof fetch;
 
   constructor(config: OpenAIConfig) {
@@ -32,6 +40,8 @@ export class OpenAILector implements LectorDeReportes {
     }
     this.apiKey = config.apiKey;
     this.modelo = config.modelo || 'gpt-4o-mini';
+    this.temperaturaBase = config.temperatura;
+    this.promptPersonalizado = config.promptPersonalizado;
     this.fetchFn = config.fetchFn || globalThis.fetch.bind(globalThis);
   }
 
@@ -39,7 +49,7 @@ export class OpenAILector implements LectorDeReportes {
     imagen: Buffer,
     mimeType: string,
     campos: CampoEsperado[],
-    temperatura = 0.1,
+    temperatura?: number,
     contexto?: ContextoAprendizaje,
   ): Promise<ResultadoLectura> {
     if (!imagen || imagen.length === 0) {
@@ -57,6 +67,7 @@ export class OpenAILector implements LectorDeReportes {
       );
     }
 
+    const tempEfectiva = resolverTemperaturaConfigurada(temperatura, this.temperaturaBase);
     const inicio = Date.now();
     const promptSistema = this.construirPrompt(campos);
     const base64 = imagen.toString('base64');
@@ -65,7 +76,7 @@ export class OpenAILector implements LectorDeReportes {
     const payload = {
       model: this.modelo,
       response_format: { type: 'json_object' },
-      temperature: temperatura,
+      temperature: tempEfectiva,
       messages: [
         { role: 'system', content: promptSistema },
         {
@@ -202,10 +213,12 @@ export class OpenAILector implements LectorDeReportes {
   }
 
   private construirPrompt(campos: CampoEsperado[]): string {
+    const custom = resolverPromptConfigurado(this.promptPersonalizado);
+    const extra = custom ? `\nInstrucciones adicionales: ${custom}` : '';
     return `Eres un transcriptor de reportes técnicos industriales manuscritos.
 No inventes datos. Si un campo no se lee, valor: null y noLeido: true.
 Casillas (tipo casilla): true si está marcada, null si no. Tipo opcion: devuelve el texto de la casilla marcada entre "opciones" o null.
-Si un campo opcional está completamente en blanco en el papel, devuelve valor: null y vacio: true (no noLeido). Si hay algo escrito que no logras leer, vacio: false y noLeido: true.
+Si un campo opcional está completamente en blanco en el papel, devuelve valor: null y vacio: true (no noLeido). Si hay algo escrito que no logras leer, vacio: false y noLeido: true.${extra}
 Campos esperados: ${JSON.stringify(campos)}.
 Devuelve JSON: { "numero_reporte": string|null, "campos": { [clave]: { valor, confianza, noLeido, dudoso, observacion, vacio } } }`;
   }

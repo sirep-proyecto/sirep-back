@@ -8,12 +8,14 @@ import { HealthController } from './health/health.controller';
 import { AppController } from './app.controller';
 import { CommonModule } from './common/common.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
     CommonModule,
+    AuthModule,
     RealtimeModule,
     EscaneosModule,
     ReportesModule,
