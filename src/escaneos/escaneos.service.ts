@@ -10,7 +10,7 @@ import {
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
-import { construirContextoDesdeReportes } from '../ia-extractor/normalizacion';
+import { construirContextoDesdeReportes, registrarEdicionEnDataset } from '../ia-extractor/normalizacion';
 import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
 import { CAMPOS_FORMULARIO } from './campos-formulario';
@@ -302,6 +302,19 @@ export class EscaneosService {
         throw new InternalServerErrorException(`Error al registrar reporte técnico: ${errorReporte.message}`);
       }
 
+      // 11. Actualizar el dataset portable con los datos confiables leídos (ej. nuevos usuarios en contacto y dirección del local)
+      const valorConfiable = (clave: string) =>
+        !camposDudosos.includes(clave) && valores[clave] ? valores[clave] : null;
+      registrarEdicionEnDataset({
+        empresa: valorConfiable('empresa'),
+        direccion: valorConfiable('direccion'),
+        contacto: valorConfiable('contacto'),
+        telefono: valorConfiable('telefono'),
+        tecnico: valorConfiable('tecnico'),
+        equipo: valorConfiable('equipo'),
+        operador: valorConfiable('operador'),
+      });
+
       this.eventos?.emitirCambio('creado', numeroReporte);
 
       return {
@@ -333,27 +346,56 @@ export class EscaneosService {
   }
 
   /**
-   * Consulta las últimas correcciones y valores validados en `reportes` para que el modelo
-   * aprenda de las ediciones hechas en la bandeja de revisión. Si la consulta falla o no hay
-   * historial, devuelve el vocabulario semilla del taller sin interrumpir el flujo.
+   * Consulta el dataset portable (`data/dataset-clientes.json`), la tabla `dataset_clientes`
+   * y el historial de `reportes` de la BD conectada (temporal u original RP-TECH) para que
+   * el modelo aprenda de cada edición y conozca qué contacto concurre a qué dirección.
    */
   private async obtenerContextoAprendido(empresaId: string): Promise<ContextoAprendizaje> {
+    let filasReportes: any[] = [];
+    let filasDataset: any[] = [];
+
     try {
       const consulta: any = this.client
         .from('reportes')
-        .select('cliente, tecnico_asignado, serie_equipo, direccion, campos_extraidos')
+        .select('cliente, tecnico_asignado, serie_equipo, direccion, contacto, telefono, operador, campos_extraidos')
         .eq('empresa_id', empresaId);
 
       const ordenada = typeof consulta.order === 'function'
         ? consulta.order('actualizado_en', { ascending: false })
         : consulta;
-      const limitada = typeof ordenada.limit === 'function' ? ordenada.limit(50) : ordenada;
+      const limitada = typeof ordenada.limit === 'function' ? ordenada.limit(100) : ordenada;
       const res = await limitada;
-      const filas = Array.isArray(res?.data) ? res.data : [];
-      return construirContextoDesdeReportes(filas);
+      if (Array.isArray(res?.data)) {
+        filasReportes = res.data;
+      }
     } catch {
-      return construirContextoDesdeReportes([]);
+      // Si la BD original aún no tiene alguna columna opcional, intenta la consulta mínima
+      try {
+        const resMin: any = await this.client
+          .from('reportes')
+          .select('cliente, tecnico_asignado, serie_equipo, direccion, campos_extraidos')
+          .eq('empresa_id', empresaId);
+        if (Array.isArray(resMin?.data)) filasReportes = resMin.data;
+      } catch {
+        filasReportes = [];
+      }
     }
+
+    try {
+      const consultaCat: any = this.client
+        .from('dataset_clientes')
+        .select('nombre_cliente, direcciones, contactos, direccion_por_contacto, correcciones')
+        .eq('empresa_id', empresaId);
+      const resCat = await consultaCat;
+      if (Array.isArray(resCat?.data)) {
+        filasDataset = resCat.data;
+      }
+    } catch {
+      // Si la BD original aún no aplicó la migración de `dataset_clientes`, continúa con el JSON portable + `reportes`
+      filasDataset = [];
+    }
+
+    return construirContextoDesdeReportes(filasReportes, filasDataset);
   }
 
   private async verificarNumeroNoRegistrado(empresaId: string, numeroReporte: string) {

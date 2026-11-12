@@ -218,5 +218,39 @@ describe('ReportesService', () => {
         service.revisarCampo('000214', 'codigo_repuesto', { tipo: 'corregir', actor: 'Ana', valor: 'X1' }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
+
+    it('actualiza el dataset en cada edición de contacto, dirección o cliente para futuras boletas', async () => {
+      filas = [fila({}, ['contacto', 'direccion'])];
+      filas[0].campos_extraidos!.empresa.valor = 'Imprenta Sol';
+      filas[0].cliente = 'Imprenta Sol';
+
+      await service.revisarCampo('000214', 'direccion', {
+        tipo: 'corregir',
+        actor: 'Ana',
+        valor: 'Av. Wilson 1230 Stand 14',
+      });
+      // Simulamos que la fila ya guardó la dirección corregida
+      filas[0].campos_extraidos!.direccion.revision = {
+        estado: 'corregido',
+        valor_corregido: 'Av. Wilson 1230 Stand 14',
+        revisado_por: 'Ana',
+        revisado_en: '2026-11-10T10:00:00Z',
+        corregido_por: 'Ana',
+        corregido_en: '2026-11-10T10:00:00Z',
+      };
+      await service.revisarCampo('000214', 'contacto', {
+        tipo: 'corregir',
+        actor: 'Ana',
+        valor: 'Roberto Paz',
+      });
+
+      const dataset = await service.obtenerDatasetClientes();
+      const contactoRegistrado = dataset.contactos?.find((c) => c.nombre === 'Roberto Paz');
+      expect(contactoRegistrado).toMatchObject({
+        nombre: 'Roberto Paz',
+        empresa: 'Imprenta Sol',
+        direccionPrincipal: 'Av. Wilson 1230 Stand 14',
+      });
+    });
   });
 });

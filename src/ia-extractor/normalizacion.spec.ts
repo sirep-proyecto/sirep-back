@@ -4,6 +4,10 @@ import {
   normalizarHoraEvaluacion,
   similitudTexto,
   compararCampo,
+  aplicarCorreccionesAprendidas,
+  construirContextoDesdeReportes,
+  registrarEdicionEnDataset,
+  reiniciarDatasetEnMemoria,
 } from './normalizacion';
 
 describe('SIREP-S2-T07: Reglas de Normalización y Comparación Automática', () => {
@@ -101,6 +105,72 @@ describe('SIREP-S2-T07: Reglas de Normalización y Comparación Automática', ()
     it('clasifica como error cuando los valores no coinciden', () => {
       const res = compararCampo('empresa', 'texto', 'Industrial Go Service', 'Textiles del Perú', false);
       expect(res.resultado).toBe('error');
+    });
+  });
+
+  describe('Dataset actualizable: Clientes, Direcciones de Locales y Contactos Registrados', () => {
+    beforeEach(() => {
+      reiniciarDatasetEnMemoria(true);
+    });
+
+    it('si no se ve bien la dirección (noLeido o baja confianza), usa el nombre en contacto para saber a cuál dirección concurre', () => {
+      const contexto = construirContextoDesdeReportes([]);
+      const campos = aplicarCorreccionesAprendidas(
+        [
+          { clave: 'empresa', valor: 'Abregu', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'contacto', valor: 'Vladimir', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'direccion', valor: null, confianza: 'baja', noLeido: true, dudoso: true },
+        ],
+        contexto,
+      );
+
+      const dir = campos.find((c) => c.clave === 'direccion')!;
+      expect(dir.valor).toBe('Gutierrez de Noriega 233');
+      expect(dir.noLeido).toBe(false);
+      expect(dir.dudoso).toBe(false);
+    });
+
+    it('si la dirección se ve borrosa o incompleta ("Av San cristobal 168"), desempata entre las direcciones a las que concurre el contacto', () => {
+      const contexto = construirContextoDesdeReportes([]);
+      const campos = aplicarCorreccionesAprendidas(
+        [
+          { clave: 'empresa', valor: 'Abregu', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'contacto', valor: 'Vladimir', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'direccion', valor: 'Av San cristobal 168', confianza: 'media', noLeido: false, dudoso: true },
+        ],
+        contexto,
+      );
+
+      const dir = campos.find((c) => c.clave === 'direccion')!;
+      expect(dir.valor).toBe('Jr. San Cristobal 1656 La Victoria');
+      expect(dir.dudoso).toBe(false);
+    });
+
+    it('guarda nuevos usuarios registrados en la casilla de contacto con cada edición y los usa aunque la nueva BD esté vacía', () => {
+      // Se edita/registra un nuevo cliente y un nuevo usuario en la casilla de contacto
+      registrarEdicionEnDataset({
+        empresa: 'Textiles Gamarra',
+        direccion: 'Jr. Gamarra 840 Tienda 204',
+        contacto: 'Marco Antonio',
+        telefono: '999888777',
+      });
+
+      // Al cambiar a la base de datos original (0 filas en la consulta inicial), el dataset sigue habilitado
+      const contexto = construirContextoDesdeReportes([]);
+      expect(contexto.contactos?.some((c) => c.nombre === 'Marco Antonio')).toBe(true);
+
+      // Entra una nueva boleta donde solo se lee el contacto "Marco Antonio" y la dirección no se ve bien
+      const campos = aplicarCorreccionesAprendidas(
+        [
+          { clave: 'empresa', valor: null, confianza: 'baja', noLeido: true, dudoso: true },
+          { clave: 'contacto', valor: 'Marco Antonio', confianza: 'alta', noLeido: false, dudoso: false },
+          { clave: 'direccion', valor: null, confianza: 'baja', noLeido: true, dudoso: true },
+        ],
+        contexto,
+      );
+
+      expect(campos.find((c) => c.clave === 'direccion')?.valor).toBe('Jr. Gamarra 840 Tienda 204');
+      expect(campos.find((c) => c.clave === 'empresa')?.valor).toBe('Textiles Gamarra');
     });
   });
 });

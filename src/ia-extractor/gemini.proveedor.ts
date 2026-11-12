@@ -265,6 +265,33 @@ export class GeminiLector implements LectorDeReportes {
         .join('\n');
       lineasContexto.push(`CORRECCIONES APRENDIDAS DE REPORTES ANTERIORES:\n${lista}`);
     }
+    if (contexto?.contactos && contexto.contactos.length > 0) {
+      const listaContactos = contexto.contactos
+        .filter((c) => c.nombre && (c.direccionPrincipal || (c.direcciones && c.direcciones.length > 0)))
+        .map((c) => {
+          const dirs = c.direcciones?.length ? c.direcciones.join(' / ') : c.direccionPrincipal;
+          const emp = c.empresa ? ` (Cliente: ${c.empresa})` : '';
+          return `  * Contacto "${c.nombre}"${emp} -> concurre al local en: ${dirs}`;
+        })
+        .join('\n');
+      if (listaContactos) {
+        lineasContexto.push(
+          `USUARIOS REGISTRADOS EN CONTACTO Y DIRECCIÓN DE SU LOCAL (si en el papel no se ve bien la dirección pero identificas este nombre en la casilla CONTACTO, úsalo para reconocer la dirección almacenada de su local):\n${listaContactos}`,
+        );
+      }
+    }
+    if (contexto?.clientes && contexto.clientes.length > 0) {
+      const listaClientes = contexto.clientes
+        .filter((cli) => cli.nombre && cli.direcciones && cli.direcciones.length > 0)
+        .map((cli) => {
+          const conts = cli.contactos?.length ? ` | Contactos: ${cli.contactos.join(', ')}` : '';
+          return `  * Cliente "${cli.nombre}" -> Locales: ${cli.direcciones.join(' | ')}${conts}`;
+        })
+        .join('\n');
+      if (listaClientes) {
+        lineasContexto.push(`DIRECTORIO DE CLIENTES Y LOCALES REGISTRADOS:\n${listaClientes}`);
+      }
+    }
     if (contexto?.valoresConocidos && Object.keys(contexto.valoresConocidos).length > 0) {
       const lista = Object.entries(contexto.valoresConocidos)
         .filter(([, vals]) => vals && vals.length > 0)

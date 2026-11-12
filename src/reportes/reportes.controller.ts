@@ -14,6 +14,12 @@ export class ReportesController {
     return this.reportes.listar();
   }
 
+  /** Dataset actualizable de clientes, direcciones de locales y usuarios de contacto registrados. */
+  @Get('dataset/clientes')
+  obtenerDatasetClientes() {
+    return this.reportes.obtenerDatasetClientes();
+  }
+
   /** Un reporte con sus campos y los enlaces temporales a las imágenes del escaneo. */
   @Get(':numero')
   obtener(@Param('numero') numero: string) {

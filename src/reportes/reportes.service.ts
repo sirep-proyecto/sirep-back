@@ -11,6 +11,12 @@ import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
 import { EMPRESA_POR_DEFECTO } from '../escaneos/escaneos.service';
+import {
+  cargarDatasetPersistente,
+  construirContextoDesdeReportes,
+  normalizarTexto,
+  registrarEdicionEnDataset,
+} from '../ia-extractor/normalizacion';
 import { AccionRevisionDto } from './dto/accion-revision.dto';
 import { columnasDesdeValores } from './reportes.columnas';
 import {
@@ -143,9 +149,91 @@ export class ReportesService {
       }
     }
 
+    if (accion.tipo === 'corregir' || accion.tipo === 'confirmar') {
+      await this.sincronizarDatasetConEdicion(campoId, accion, valorNuevo, base, valores);
+    }
+
     this.eventos?.emitirCambio('actualizado', numero);
 
     return this.obtener(numero);
+  }
+
+  /**
+   * Devuelve el dataset actualizable de clientes, direcciones de locales y usuarios registrados en `contacto`,
+   * combinando el archivo portable (`data/dataset-clientes.json`) con la base de datos conectada.
+   */
+  async obtenerDatasetClientes() {
+    try {
+      const { data } = await this.client
+        .from('reportes')
+        .select('cliente, tecnico_asignado, serie_equipo, direccion, contacto, telefono, operador, campos_extraidos')
+        .eq('empresa_id', EMPRESA_POR_DEFECTO)
+        .order('actualizado_en', { ascending: false })
+        .limit(100);
+      const filas = Array.isArray(data) ? data : [];
+      return construirContextoDesdeReportes(filas as any);
+    } catch {
+      return construirContextoDesdeReportes([]);
+    }
+  }
+
+  /**
+   * Actualiza el dataset portable (`data/dataset-clientes.json`) y la tabla `dataset_clientes` (si está disponible)
+   * con cada edición o confirmación en la bandeja, guardando el cliente, la dirección del local y el usuario de contacto.
+   */
+  private async sincronizarDatasetConEdicion(
+    campoId: string,
+    accion: AccionRevisionDto,
+    valorNuevo: string,
+    base: CampoGuardado,
+    valores: Record<string, string | null>,
+  ) {
+    const valorOriginal = typeof base.valor === 'string' ? base.valor.trim() : null;
+    const datasetActualizado = registrarEdicionEnDataset({
+      empresa: valores.empresa,
+      direccion: valores.direccion,
+      contacto: valores.contacto,
+      telefono: valores.telefono,
+      tecnico: valores.tecnico,
+      equipo: valores.equipo,
+      operador: valores.operador,
+      correccion:
+        accion.tipo === 'corregir' && valorNuevo
+          ? {
+              campo: campoId,
+              valorErroneo: valorOriginal,
+              valorCorregido: valorNuevo,
+            }
+          : null,
+    });
+
+    if (!valores.empresa) return;
+
+    try {
+      const normEmpresa = normalizarTexto(valores.empresa);
+      const clienteEnDataset = datasetActualizado.clientes.find(
+        (c) => normalizarTexto(c.nombre) === normEmpresa,
+      );
+      if (!clienteEnDataset) return;
+
+      const tablaDataset: any = this.client.from('dataset_clientes');
+      if (typeof tablaDataset?.upsert === 'function') {
+        await tablaDataset.upsert(
+          {
+            empresa_id: EMPRESA_POR_DEFECTO,
+            clave_normalizada: normEmpresa,
+            nombre_cliente: clienteEnDataset.nombre,
+            direcciones: clienteEnDataset.direcciones,
+            contactos: clienteEnDataset.contactos,
+            direccion_por_contacto: clienteEnDataset.direccionPorContacto ?? {},
+            correcciones: datasetActualizado.correcciones.slice(0, 60),
+          },
+          { onConflict: 'empresa_id,clave_normalizada' },
+        );
+      }
+    } catch {
+      // Si la base original aún no tiene la tabla `dataset_clientes`, el dataset portable en disco y memoria ya guardó el cambio.
+    }
   }
 
   private aplicarAccion(

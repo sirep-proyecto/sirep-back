@@ -74,10 +74,38 @@ export interface CorreccionAprendida {
   valorCorregido: string;
 }
 
+/** Registro de un usuario de contacto (casilla CONTACTO) y los locales donde concurre. */
+export interface ContactoRegistrado {
+  /** Nombre canónico del usuario en la casilla de contacto (ej. "Vladimir", "Julio") */
+  nombre: string;
+  /** Empresa / cliente al que pertenece (ej. "Abregu") */
+  empresa?: string | null;
+  /** Dirección principal o más reciente del local donde concurre este contacto */
+  direccionPrincipal?: string | null;
+  /** Historial de direcciones de locales donde se ha registrado a este contacto */
+  direcciones: string[];
+  /** Teléfono asociado si se registró */
+  telefono?: string | null;
+}
+
+/** Registro de un cliente (empresa) con las direcciones de sus locales y sus contactos. */
+export interface ClienteRegistrado {
+  /** Nombre canónico del cliente (ej. "Abregu") */
+  nombre: string;
+  /** Direcciones de los locales donde se hicieron boletas para este cliente */
+  direcciones: string[];
+  /** Nombres de usuarios registrados en la casilla de contacto para este cliente */
+  contactos: string[];
+  /** Mapa de nombre de contacto (normalizado) -> dirección del local donde concurre ese contacto */
+  direccionPorContacto?: Record<string, string>;
+}
+
 /** Contexto histórico de correcciones y entidades reales para guiar futuras lecturas. */
 export interface ContextoAprendizaje {
   correcciones?: CorreccionAprendida[];
   valoresConocidos?: Record<string, string[]>;
+  clientes?: ClienteRegistrado[];
+  contactos?: ContactoRegistrado[];
 }
 
 /** Interfaz unificada para los lectores de IA intercambiables */
