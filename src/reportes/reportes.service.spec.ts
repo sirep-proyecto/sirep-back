@@ -296,4 +296,98 @@ describe('ReportesService', () => {
       expect(expXlsx.buffer.length).toBeGreaterThan(500);
     });
   });
+
+  describe('SIREP-S3-T10 y T11: Vinculación e importación idempotente', () => {
+    it('calcula sugerencias de vinculación por similitud (T10)', async () => {
+      filas = [fila({ cliente: 'Industrial Go Service', serie_equipo: 'UV DTF 60', tecnico_asignado: 'Carlos' })];
+      const r = await service.obtener('000214');
+      expect(r.vinculos_sugeridos).toBeDefined();
+    });
+
+    it('rechaza importar si aún tiene campos pendientes (T11)', async () => {
+      filas = [fila({}, ['codigo_repuesto'])];
+      await expect(service.importarReporteRevisado('000214')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('importa de forma idempotente un reporte sin pendientes (T11)', async () => {
+      filas = [fila({}, [])]; // sin campos dudosos pendientes
+      const res1 = await service.importarReporteRevisado('000214');
+      expect(res1.status).toBe('importado_exitoso');
+
+      // Segunda llamada: debe responder ya_importado sin duplicar
+      filas[0].estado_reporte = 'aprobado_rptech';
+      const res2 = await service.importarReporteRevisado('000214');
+      expect(res2.status).toBe('ya_importado');
+    });
+  });
+
+  describe('SIREP-S3-T09, T10, T13 y T18: Bloqueo histórico, vínculos, lote y métricas', () => {
+    it('bloquea ediciones directas cuando el reporte histórico ya está cerrado (T09)', async () => {
+      filas = [fila({ bloqueado: true, estado_reporte: 'aprobado_rptech' }, [])];
+      await expect(
+        service.revisarCampo('000214', 'empresa', { tipo: 'corregir', actor: 'David', valor: 'Otra' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('guarda vínculos a catálogos preservando intacto el texto manuscrito leído (T10)', async () => {
+      filas = [fila({ cliente: 'Abregu' })];
+      const r = await service.vincularEntidades('000214', {
+        cliente_id: 'cli-uuid-1',
+        equipo_id: 'eq-uuid-2',
+      });
+      const upd = actualizaciones.find((a) => a.tabla === 'reportes')!;
+      expect(upd.datos).toEqual({ cliente_id: 'cli-uuid-1', equipo_id: 'eq-uuid-2' });
+      expect(r.cliente).toBe('Abregu');
+    });
+
+    it('pasa en lote los reportes sin pendientes sin re-escanear y respalda datos_originales (T13)', async () => {
+      const listo = fila({ id: 'rep-1', numero_talonario: '000214', estado_reporte: 'aprobado' }, []);
+      const yaCerrado = fila({ id: 'rep-2', numero_talonario: '000215', estado_reporte: 'aprobado_rptech', bloqueado: true }, []);
+      const conPendiente = fila({ id: 'rep-3', numero_talonario: '000216' }, ['codigo_repuesto']);
+      filas = [listo, yaCerrado, conPendiente];
+
+      const res = await service.importarReportesRevisadosEnLote('Valentino');
+      expect(res.totalRevisadosListos).toBe(2);
+      expect(res.importadosNuevos).toBe(1);
+      expect(res.yaImportados).toBe(1);
+      expect(res.pendientesOmitidos).toBe(1);
+      expect(res.numerosImportados).toEqual(['000214']);
+
+      const upd = actualizaciones.find((a) => a.tabla === 'reportes' && a.filtros.id === 'rep-1')!;
+      expect(upd.datos.bloqueado).toBe(true);
+      expect(upd.datos.estado_reporte).toBe('aprobado_rptech');
+      expect(upd.datos.datos_originales).toBeDefined();
+    });
+
+    it('genera métricas diarias por campo con las columnas exigidas y cero datos de clientes (T18)', async () => {
+      const f = fila({ cliente: 'CONFIDENCIAL CLIENTE SAC' }, ['codigo_repuesto']);
+      f.campos_extraidos!.empresa.revision = {
+        estado: 'corregido',
+        valor_corregido: 'CONFIDENCIAL CLIENTE SAC',
+        revisado_por: 'David',
+        revisado_en: '2026-11-14T10:00:00Z',
+        corregido_por: 'David',
+        corregido_en: '2026-11-14T10:00:00Z',
+      };
+      f.campos_extraidos!.tecnico.revision = {
+        estado: 'confirmado',
+        valor_corregido: null,
+        revisado_por: 'Valentino',
+        revisado_en: '2026-11-14T10:00:00Z',
+        corregido_por: null,
+        corregido_en: null,
+      };
+      filas = [f];
+
+      const metricas = await service.obtenerMetricasCampos();
+      expect(metricas.totalReportes).toBe(1);
+      expect(metricas.metricas).toHaveLength(IDS_CAMPOS_FORMULARIO.length);
+      expect(metricas.csv.startsWith('campo,total,confirmados,corregidos,ilegibles,confianza_declarada\n')).toBe(true);
+      expect(metricas.csv).not.toContain('CONFIDENCIAL CLIENTE SAC');
+      expect(metricas.csv).toContain('empresa,1,0,1,0,');
+      expect(metricas.csv).toContain('codigo_repuesto,1,0,0,1,');
+    });
+  });
 });

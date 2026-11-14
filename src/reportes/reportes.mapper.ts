@@ -134,6 +134,15 @@ export interface FilaReporte {
   id: string;
   numero_talonario: string | null;
   origen: 'historico' | 'sistema';
+  estado_reporte?: string | null;
+  bloqueado?: boolean | null;
+  datos_originales?: Record<string, any> | null;
+  importado_en?: string | null;
+  cliente_id?: string | null;
+  equipo_id?: string | null;
+  tecnico_perfil_id?: string | null;
+  corregido_por?: string | null;
+  fecha_correccion?: string | null;
   cliente: string | null;
   fecha: string | null;
   serie_equipo: string | null;
@@ -149,8 +158,24 @@ export function numeroVisible(fila: Pick<FilaReporte, 'id' | 'numero_talonario'>
   return fila.numero_talonario ?? `SN-${fila.id.slice(0, 8)}`;
 }
 
+export interface SugerenciaVinculo {
+  id?: string;
+  nombre: string;
+  similitud: number;
+}
+
+export interface VinculosReporte {
+  cliente: SugerenciaVinculo | null;
+  equipo: SugerenciaVinculo | null;
+  tecnico: SugerenciaVinculo | null;
+}
+
 /** Contrato que consume la bandeja de revisión del frontend (`RepositorioReportes`). */
-export function aReporteContrato(fila: FilaReporte, urlsPaginas: string[] = []) {
+export function aReporteContrato(
+  fila: FilaReporte,
+  urlsPaginas: string[] = [],
+  vinculos?: VinculosReporte,
+) {
   const campos = construirCampos(fila.campos_extraidos);
   const estado = derivarEstado(campos);
   const escaneo = fila.escaneo;
@@ -166,7 +191,18 @@ export function aReporteContrato(fila: FilaReporte, urlsPaginas: string[] = []) 
     fecha_reporte: fila.fecha ?? '',
     origen: fila.origen,
     estado,
+    estado_reporte: fila.estado_reporte ?? null,
+    bloqueado: Boolean(fila.bloqueado),
+    cliente_id: fila.cliente_id ?? null,
+    equipo_id: fila.equipo_id ?? null,
+    tecnico_perfil_id: fila.tecnico_perfil_id ?? null,
+    importado_en: fila.importado_en ?? null,
     diseno_talonario: DISENO_TALONARIO,
+    vinculos_sugeridos: vinculos ?? {
+      cliente: null,
+      equipo: null,
+      tecnico: null,
+    },
     escaneo: {
       id: escaneo?.id ?? '',
       numero_reporte: numero,

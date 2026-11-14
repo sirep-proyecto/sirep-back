@@ -65,4 +65,26 @@ Se acuerda que el formulario físico cuenta con **31 campos**, los cuales se per
 
 ## 4. Cómo se Aplican los Cambios
 1. En el repositorio de **SIREP** (`sirep-back`), el esquema base y las columnas de consulta operan mediante las migraciones versionadas en `supabase/migrations/` (100% reproducibles con `supabase db reset`).
-2. Una vez aprobada esta acta por el coordinador en la **Etapa 3 (Decisión)**, se enviará el Pull Request con la migración SQL al repositorio de **RP-TECH**, revisada por Adrián Miranda.
+2. Para la fase de producción del Sprint 3, se decidió conservar la base de datos actual de **SIREP** aplicando la migración aditiva [`20261114000000_sprint3_integracion_historico_y_vinculos.sql`](../../supabase/migrations/20261114000000_sprint3_integracion_historico_y_vinculos.sql) sin eliminar ni reescribir datos existentes.
+
+---
+
+## 5. Reglas del Reporte Histórico, Vinculación e Importación Idempotente (`SIREP-S3-T09`, `T10`, `T11`)
+
+### 5.1. Reglas del reporte histórico (`SIREP-S3-T09`)
+- Todo reporte ingresado desde papel escaneado entra con `origen = 'historico'` y mantiene adjunto su documento original mediante `escaneo_id`.
+- Los campos propios del flujo digital de RP-TECH (`fotos_ingreso`, `fotos_salida`, `firmas_digitales_pad`, `numero_caso_crm`) permanecen como columnas `nullable` para `origen = 'historico'`, ya que los talonarios históricos no provienen de un caso CRM previo.
+- Al cerrarse o importarse definitivamente, el reporte queda con `estado_reporte = 'aprobado_rptech'`, `bloqueado = true` e `importado_en` sellado con la marca temporal UTC. Cualquier edición posterior exige reapertura explícita (`accion.tipo = 'reabrir'`); de lo contrario responde `409 Conflict`.
+- Se garantiza la unicidad del par `(empresa_id, numero_talonario)` mediante índice único parcial (`where numero_talonario is not null`).
+- El respaldo íntegro de los 31 campos leídos originalmente por el modelo queda congelado en `datos_originales` (`jsonb`) sin perderse al corregir o exportar.
+
+### 5.2. Vinculación por similitud (`SIREP-S3-T10`)
+- Al consultar un reporte (`GET /reportes/:numero`) o cerrarlo (`PATCH /reportes/:numero/importar`), el servicio ejecuta `calcularVinculosSugeridos` contra el catálogo de clientes, equipos y técnicos/perfiles usando similitud normalizada (`>= 0.55` como sugerencia en `vinculos_sugeridos`, y vinculación automática opcional si existe `id` de catálogo con similitud `>= 0.85`).
+- El texto manuscrito leído (`cliente`, `serie_equipo`, `tecnico_asignado`) **siempre se conserva intacto**. Si algún catálogo aún no existe o no supera el umbral de similitud, las columnas `cliente_id`, `equipo_id` y `tecnico_perfil_id` permanecen `NULL` para revisión humana manual desde `PATCH /reportes/:numero/vinculos`.
+
+### 5.3. Contrato de importación idempotente (`SIREP-S3-T11`)
+- **Endpoint individual:** `PATCH /reportes/:numero/importar` (requiere sesión autenticada).
+  - Precondición: el reporte no debe tener campos con `estado_revision === 'pendiente'`. Si existen pendientes, responde `400 Bad Request`.
+  - Primera ejecución: marca `estado_reporte = 'aprobado_rptech'`, `bloqueado = true`, `importado_en`, guarda respaldo en `datos_originales`, vincula catálogos con similitud `>= 0.85`, sincroniza `escaneos.estado = 'completo'` y responde `{ status: 'importado_exitoso', ... }`.
+  - Reejecuciones posteriores (mismo `numero_reporte`): detecta el estado cerrado sin duplicar registros ni sobrescribir el historial y responde `{ status: 'ya_importado', ... }`.
+- **Importación en lote (`SIREP-S3-T13`):** `POST /reportes/importar-lote` y el script `scripts/migrar-revisados-rptech.mjs` procesan todos los reportes históricos ya aprobados/sin pendientes sin re-escanear archivos ni llamar al modelo de IA.

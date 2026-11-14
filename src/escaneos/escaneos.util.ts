@@ -161,18 +161,43 @@ export async function validarImagen(buffer: Buffer): Promise<{ extension: string
   }
 }
 
+export interface OpcionesOptimizacionIA {
+  ladoLargo?: number;
+  normalizarContraste?: boolean;
+  nitidez?: boolean;
+}
+
 /**
  * Copia comprimida para el modelo. El original queda intacto en Storage porque es el
  * archivo del reporte. 1600 px de lado largo es el valor de SIREGG (comprobantes
- * impresos); para manuscrito se ajusta con la prueba de viabilidad vía IA_LADO_LARGO_PX.
+ * impresos); para manuscrito se ajusta vía IA_LADO_LARGO_PX.
+ * SIREP-S3-T17: Soporta preprocesamiento configurable (contraste y nitidez) mediante
+ * IA_PREPROCESAR_IMAGEN, IA_NORMALIZAR_CONTRASTE e IA_NITIDEZ sin tocar código.
  */
-export async function optimizarParaIA(imagen: Buffer): Promise<{ buffer: Buffer; mimetype: string }> {
-  const ladoLargo = enteroDeEnv('IA_LADO_LARGO_PX', 1600);
-  const optimizado = await sharp(imagen)
+export async function optimizarParaIA(
+  imagen: Buffer,
+  opciones: OpcionesOptimizacionIA = {},
+): Promise<{ buffer: Buffer; mimetype: string }> {
+  const ladoLargo = opciones.ladoLargo ?? enteroDeEnv('IA_LADO_LARGO_PX', 1600);
+  const normalizarContraste =
+    opciones.normalizarContraste ??
+    (process.env.IA_NORMALIZAR_CONTRASTE === 'true' || process.env.IA_PREPROCESAR_IMAGEN === 'true');
+  const nitidez =
+    opciones.nitidez ??
+    (process.env.IA_NITIDEZ === 'true' || process.env.IA_PREPROCESAR_IMAGEN === 'true');
+
+  let pipeline: any = sharp(imagen)
     .rotate()
-    .resize(ladoLargo, ladoLargo, { fit: 'inside', withoutEnlargement: true })
-    .jpeg({ quality: 85 })
-    .toBuffer();
+    .resize(ladoLargo, ladoLargo, { fit: 'inside', withoutEnlargement: true });
+
+  if (normalizarContraste && typeof pipeline.normalize === 'function') {
+    pipeline = pipeline.normalize();
+  }
+  if (nitidez && typeof pipeline.sharpen === 'function') {
+    pipeline = pipeline.sharpen();
+  }
+
+  const optimizado = await pipeline.jpeg({ quality: 85 }).toBuffer();
   return { buffer: optimizado, mimetype: 'image/jpeg' };
 }
 

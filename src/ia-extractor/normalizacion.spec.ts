@@ -102,6 +102,12 @@ describe('SIREP-S2-T07: Reglas de Normalización y Comparación Automática', ()
       expect(res.similitud).toBeDefined();
     });
 
+    it('clasifica como sin referencia si falta el valor en la plantilla de control (SIREP-S3-T15)', () => {
+      const res = compararCampo('tecnico', 'texto', undefined, 'Carlos Ramos', false);
+      expect(res.resultado).toBe('sin referencia');
+      expect(res.valorEsperado).toBe('(sin referencia)');
+    });
+
     it('clasifica como error cuando los valores no coinciden', () => {
       const res = compararCampo('empresa', 'texto', 'Industrial Go Service', 'Textiles del Perú', false);
       expect(res.resultado).toBe('error');

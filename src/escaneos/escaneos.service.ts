@@ -196,8 +196,12 @@ export class EscaneosService {
 
     try {
       // 6. Lectura con el modelo, página por página, inyectando el contexto de correcciones aprendidas
-      const contexto = await this.obtenerContextoAprendido(empresaId);
+      const { contexto, totalReportesPrevios } = await this.obtenerContextoYConteo(empresaId);
       const temperaturaConfigurada = resolverTemperaturaConfigurada();
+      const limiteRevisionCompleta = this.resolverLimiteRevisionCompleta();
+      const enModoRevisionCompleta =
+        limiteRevisionCompleta > 0 && totalReportesPrevios < limiteRevisionCompleta;
+
       const lecturas: ResultadoLectura[] = [];
       for (const [indice, pagina] of imagenesPaginas.entries()) {
         const copiaIA = await optimizarParaIA(pagina);
@@ -230,11 +234,16 @@ export class EscaneosService {
       }
 
       // 8. Campos dudosos o no leídos = lo que irá a la bandeja de revisión
+      // SIREP-S3-T18: En producción, los primeros N reportes (30 por defecto) se revisan completos campo por campo.
       const camposDudosos: string[] = [];
       const camposMapa: Record<string, any> = {};
       for (const campo of lectura.campos) {
-        camposMapa[campo.clave] = campo;
-        if (campo.dudoso || campo.confianza === 'baja' || campo.noLeido) {
+        const marcadoParaRevision = enModoRevisionCompleta
+          ? true
+          : Boolean(campo.dudoso || campo.confianza === 'baja' || campo.noLeido);
+        const campoFinal = enModoRevisionCompleta ? { ...campo, dudoso: true } : campo;
+        camposMapa[campo.clave] = campoFinal;
+        if (marcadoParaRevision) {
           camposDudosos.push(campo.clave);
         }
       }
@@ -347,12 +356,24 @@ export class EscaneosService {
     }
   }
 
+  private resolverLimiteRevisionCompleta(): number {
+    const raw = process.env.REVISION_COMPLETA_PRIMEROS_N;
+    if (raw !== undefined && raw !== '') {
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+    }
+    if (process.env.MODO_REVISION_COMPLETA_30 === 'true') return 30;
+    return process.env.NODE_ENV === 'production' ? 30 : 0;
+  }
+
   /**
    * Consulta el dataset portable (`data/dataset-clientes.json`), la tabla `dataset_clientes`
-   * y el historial de `reportes` de la BD conectada (temporal u original RP-TECH) para que
-   * el modelo aprenda de cada edición y conozca qué contacto concurre a qué dirección.
+   * y el historial de `reportes` de la BD conectada para que el modelo aprenda de cada edición
+   * y además informe cuántos reportes previos existen para la cuota de revisión completa (T18).
    */
-  private async obtenerContextoAprendido(empresaId: string): Promise<ContextoAprendizaje> {
+  private async obtenerContextoYConteo(
+    empresaId: string,
+  ): Promise<{ contexto: ContextoAprendizaje; totalReportesPrevios: number }> {
     let filasReportes: any[] = [];
     let filasDataset: any[] = [];
 
@@ -432,7 +453,10 @@ export class EscaneosService {
       // Si la tabla `clientes` no existe en el entorno actual, se continúa sin error
     }
 
-    return construirContextoDesdeReportes(filasReportes, filasDataset);
+    return {
+      contexto: construirContextoDesdeReportes(filasReportes, filasDataset),
+      totalReportesPrevios: filasReportes.length,
+    };
   }
 
   private async verificarNumeroNoRegistrado(empresaId: string, numeroReporte: string) {

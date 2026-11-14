@@ -4,6 +4,7 @@ import {
   Get,
   Param,
   Patch,
+  Post,
   Query,
   Req,
   Res,
@@ -68,10 +69,77 @@ export class ReportesController {
     return this.exportarExcel(formato, res);
   }
 
+  /**
+   * SIREP-S3-T18: Métricas agregadas por campo (sin ningún dato de clientes).
+   * Con `?formato=csv` devuelve directamente `campo,total,confirmados,corregidos,ilegibles,confianza_declarada`.
+   */
+  @Get('metricas/campos')
+  async obtenerMetricasCampos(
+    @Query('formato') formato?: string,
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    const metricas = await this.reportes.obtenerMetricasCampos();
+    if (formato?.toLowerCase() === 'csv' && res && typeof res.setHeader === 'function') {
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="metricas_${metricas.fecha}.csv"`,
+      );
+      return metricas.csv;
+    }
+    return metricas;
+  }
+
+  /** Alias para consumo diario automatizado (`/reportes/metricas/diarias`). */
+  @Get('metricas/diarias')
+  obtenerMetricasDiarias(
+    @Query('formato') formato?: string,
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    return this.obtenerMetricasCampos(formato, res);
+  }
+
+  /**
+   * SIREP-S3-T13: Paso en lote de todos los reportes ya revisados a estado cerrado/importado
+   * sin volver a escanear ni consumir IA.
+   */
+  @Post('importar-lote')
+  importarLote(@Req() req?: any) {
+    const actor = req?.usuario?.nombre || req?.usuario?.email || 'sistema';
+    return this.reportes.importarReportesRevisadosEnLote(actor);
+  }
+
   /** Un reporte con sus campos y los enlaces temporales a las imágenes del escaneo. */
   @Get(':numero')
   obtener(@Param('numero') numero: string) {
     return this.reportes.obtener(numero);
+  }
+
+  /**
+   * SIREP-S3-T10: Guardar vínculos (`cliente_id`, `equipo_id`, `tecnico_perfil_id`)
+   * conservando intacto el texto manuscrito leído originalmente.
+   */
+  @Patch(':numero/vinculos')
+  vincular(
+    @Param('numero') numero: string,
+    @Body()
+    vinculos: {
+      cliente_id?: string | null;
+      equipo_id?: string | null;
+      tecnico_perfil_id?: string | null;
+    },
+  ) {
+    return this.reportes.vincularEntidades(numero, vinculos);
+  }
+
+  /**
+   * SIREP-S3-T11: Endpoint del contrato de importación idempotente.
+   * Cierra el reporte revisado y no lo duplica si se llama más de una vez.
+   */
+  @Patch(':numero/importar')
+  importar(@Param('numero') numero: string, @Req() req?: any) {
+    const actor = req?.usuario?.nombre || req?.usuario?.email || 'sistema';
+    return this.reportes.importarReporteRevisado(numero, actor);
   }
 
   /**

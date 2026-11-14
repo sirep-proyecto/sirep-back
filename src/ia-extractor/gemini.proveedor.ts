@@ -317,6 +317,15 @@ export class GeminiLector implements LectorDeReportes {
     const bloqueContexto = lineasContexto.length > 0 ? `\n\n${lineasContexto.join('\n\n')}` : '';
     const promptConfigurado = resolverPromptConfigurado(this.promptPersonalizado);
     const bloqueExtraPrompt = promptConfigurado ? `\n\nINSTRUCCIONES DE PROMPT CONFIGURADAS:\n${promptConfigurado}` : '';
+    const usarSecciones = process.env.IA_PROMPT_SECCIONES === 'true';
+    const bloqueSecciones = usarSecciones
+      ? `\n\nMODO POR SECCIONES DEL TALONARIO (inspecciona bloque por bloque en orden visual):
+- SECCIÓN 1 (Cabecera): numero_reporte, tecnico, empresa, fecha, telefono, direccion, contacto, equipo, motivo.
+- SECCIÓN 2 (Revisión Inicial): estado_del_equipo, ultimo_mantenimiento, limpieza_equipo, cabezales, sistema_proteccion, tinta, revision_linea_ln, revision_linea_lt, revision_linea_nt, operador.
+- SECCIÓN 3 (Servicio Realizado): procedimiento, conclusion, recomendaciones.
+- SECCIÓN 4 (Repuestos Requeridos): repuestos_tipo, codigo_repuesto, repuestos_descripcion, repuestos_cantidad.
+- SECCIÓN 5 (Labor y Cierre): hora_llegada, hora_salida, garantia, facturado, firma_operador, firma_cliente.`
+      : '';
 
     return `Eres un sistema especializado en extracción y lectura de reportes técnicos de servicio industrial manuscritos (escritos a mano).
 
@@ -351,7 +360,7 @@ REGLAS OBLIGATORIAS (Guía SIREP):
 6. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
 7. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
 8. Para cada campo con tinta que incluyas en "campos", devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000 medidos sobre la IMAGEN COMPLETA (encerrando solo el área con el valor manuscrito, no la etiqueta impresa).
-9. En "observacion" escribe una frase corta en español SOLO cuando la confianza sea "media" o "baja" explicando qué letra o dígito generó duda. Si la confianza es "alta", omite "observacion" o déjala vacía.${bloqueContexto}${bloqueExtraPrompt}
+9. En "observacion" escribe una frase corta en español SOLO cuando la confianza sea "media" o "baja" explicando qué letra o dígito generó duda. Si la confianza es "alta", omite "observacion" o déjala vacía.${bloqueContexto}${bloqueSecciones}${bloqueExtraPrompt}
 
 CAMPOS SOLICITADOS:
 ${JSON.stringify(campos)}

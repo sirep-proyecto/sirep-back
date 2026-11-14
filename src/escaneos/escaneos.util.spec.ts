@@ -1,9 +1,11 @@
+import sharp from 'sharp';
 import {
     calcularHuellaSHA256,
     esPDF,
     extraerNumeroReporte,
     fusionarLecturas,
     normalizarFecha,
+    optimizarParaIA,
 } from './escaneos.util';
 import { ResultadoLectura } from '../ia-extractor/types';
 
@@ -116,6 +118,24 @@ describe('escaneos.util', () => {
 
         it('con una sola página devuelve la lectura tal cual', () => {
             expect(fusionarLecturas([anverso])).toBe(anverso);
+        });
+    });
+
+    describe('optimizarParaIA (SIREP-S3-T17)', () => {
+        it('produce JPEG válido con preprocesamiento de contraste y nitidez activados', async () => {
+            const img = await sharp({
+                create: { width: 80, height: 60, channels: 3, background: '#f5f5f5' },
+            })
+                .png()
+                .toBuffer();
+
+            const res = await optimizarParaIA(img, {
+                ladoLargo: 1200,
+                normalizarContraste: true,
+                nitidez: true,
+            });
+            expect(res.mimetype).toBe('image/jpeg');
+            expect(res.buffer.subarray(0, 2).toString('hex')).toBe('ffd8');
         });
     });
 });

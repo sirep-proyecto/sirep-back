@@ -16,6 +16,7 @@ import {
   construirContextoDesdeReportes,
   normalizarTexto,
   registrarEdicionEnDataset,
+  similitudTexto,
 } from '../ia-extractor/normalizacion';
 import { AccionRevisionDto } from './dto/accion-revision.dto';
 import { columnasDesdeValores } from './reportes.columnas';
@@ -30,10 +31,13 @@ import {
   CampoContrato,
   FilaReporte,
   RevisionCampo,
+  SugerenciaVinculo,
+  VinculosReporte,
   aReporteContrato,
   campoRequiereRevision,
   construirCampos,
   derivarEstado,
+  numeroVisible,
   valorVigente,
 } from './reportes.mapper';
 
@@ -78,7 +82,103 @@ export class ReportesService {
   async obtener(numero: string) {
     const fila = await this.buscarFila(numero);
     const urls = await this.firmarPaginas(fila);
-    return aReporteContrato(fila, urls);
+    const vinculos = await this.calcularVinculosSugeridos(fila);
+    return aReporteContrato(fila, urls, vinculos);
+  }
+
+  /**
+   * SIREP-S3-T10: Sugerencia de vinculación de cliente, equipo y técnico buscando
+   * por similitud en los catálogos y reportes previos.
+   */
+  async calcularVinculosSugeridos(fila: FilaReporte): Promise<VinculosReporte> {
+    const buscarMejor = (texto: string | null | undefined, candidatos: Array<{ id?: string; nombre: string }>): SugerenciaVinculo | null => {
+      const limpio = (texto || '').trim();
+      if (!limpio || candidatos.length === 0) return null;
+      let mejor: SugerenciaVinculo | null = null;
+      let mejorSim = 0;
+      for (const cand of candidatos) {
+        const score = similitudTexto(limpio, cand.nombre);
+        if (score >= 0.55 && score > mejorSim) {
+          mejorSim = score;
+          mejor = { id: cand.id, nombre: cand.nombre, similitud: Math.round(score * 100) / 100 };
+        }
+      }
+      return mejor;
+    };
+
+    const dataset = await this.obtenerDatasetClientes();
+    const clientesCandidatos: Array<{ id?: string; nombre: string }> = (dataset.clientes ?? []).map((c) => ({
+      nombre: c.nombre,
+    }));
+    const equiposCandidatos: Array<{ id?: string; nombre: string }> = (dataset.valoresConocidos?.equipo ?? []).map((e) => ({
+      nombre: e,
+    }));
+    const tecnicosCandidatos: Array<{ id?: string; nombre: string }> = (dataset.valoresConocidos?.tecnico ?? []).map((t) => ({
+      nombre: t,
+    }));
+
+    const cargarCatalogo = async (tabla: string, destino: Array<{ id?: string; nombre: string }>) => {
+      try {
+        const res: any = await this.client.from(tabla).select('id, nombre').eq('empresa_id', EMPRESA_POR_DEFECTO).limit(500);
+        if (Array.isArray(res?.data)) {
+          for (const item of res.data) {
+            if (typeof item?.id === 'string' && typeof item?.nombre === 'string' && item.nombre.trim()) {
+              destino.unshift({ id: item.id, nombre: item.nombre.trim() });
+            }
+          }
+        }
+      } catch {
+        // Si la tabla aún no existe o no aplica en el entorno actual, continúa con el dataset aprendido.
+      }
+    };
+
+    await Promise.all([
+      cargarCatalogo('clientes', clientesCandidatos),
+      cargarCatalogo('equipos', equiposCandidatos),
+      cargarCatalogo('perfiles', tecnicosCandidatos),
+    ]);
+
+    return {
+      cliente: buscarMejor(fila.cliente, clientesCandidatos),
+      equipo: buscarMejor(fila.serie_equipo, equiposCandidatos),
+      tecnico: buscarMejor(fila.tecnico_asignado, tecnicosCandidatos),
+    };
+  }
+
+  /**
+   * SIREP-S3-T10: Guarda vínculos manuales o sugeridos (`cliente_id`, `equipo_id`, `tecnico_perfil_id`)
+   * manteniendo intacto el texto manuscrito originalmente leído (`cliente`, `serie_equipo`, `tecnico_asignado`).
+   */
+  async vincularEntidades(
+    numero: string,
+    vinculos: { cliente_id?: string | null; equipo_id?: string | null; tecnico_perfil_id?: string | null },
+  ) {
+    const fila = await this.buscarFila(numero);
+    if (fila.bloqueado || fila.estado_reporte === 'cerrado') {
+      throw new ConflictException(`El reporte N° ${numero} está cerrado y bloqueado.`);
+    }
+
+    const actualizacion: Record<string, any> = {};
+    if (vinculos.cliente_id !== undefined) actualizacion.cliente_id = vinculos.cliente_id || null;
+    if (vinculos.equipo_id !== undefined) actualizacion.equipo_id = vinculos.equipo_id || null;
+    if (vinculos.tecnico_perfil_id !== undefined) actualizacion.tecnico_perfil_id = vinculos.tecnico_perfil_id || null;
+
+    if (Object.keys(actualizacion).length === 0) {
+      throw new BadRequestException('Debe especificar al menos un identificador de vínculo.');
+    }
+
+    const { error } = await this.client
+      .from('reportes')
+      .update(actualizacion)
+      .eq('id', fila.id);
+
+    if (error) {
+      this.logger.error(`No se pudieron guardar los vínculos de ${numero}: ${error.message}`);
+      throw new InternalServerErrorException('No se pudieron guardar los vínculos del reporte.');
+    }
+
+    this.eventos?.emitirCambio('actualizado', numero);
+    return this.obtener(numero);
   }
 
   async revisarCampo(numero: string, campoId: string, accion: AccionRevisionDto) {
@@ -87,6 +187,12 @@ export class ReportesService {
     }
 
     const fila = await this.buscarFila(numero);
+    const estaBloqueado =
+      fila.bloqueado === true || fila.estado_reporte === 'aprobado_rptech' || fila.estado_reporte === 'cerrado';
+    if (estaBloqueado && accion.tipo !== 'reabrir') {
+      throw new ConflictException(`El reporte histórico N° ${numero} ya está cerrado y bloqueado. Reabre el campo antes de editarlo.`);
+    }
+
     const guardados: Record<string, CampoGuardado> = { ...(fila.campos_extraidos ?? {}) };
     const camposActuales = construirCampos(guardados);
     const actual = camposActuales.find((c) => c.id === campoId) as CampoContrato;
@@ -132,6 +238,7 @@ export class ReportesService {
         campos_extraidos: guardados,
         campos_dudosos: pendientes,
         estado_reporte: pendientes.length === 0 ? 'aprobado' : 'pendiente_revision',
+        ...(accion.tipo === 'reabrir' ? { bloqueado: false } : {}),
         ...columnasDesdeValores(valores),
         ...(accion.tipo === 'corregir' ? { corregido_por: actorRevisor, fecha_correccion: ahora } : {}),
       })
@@ -168,8 +275,263 @@ export class ReportesService {
   }
 
   /**
+   * SIREP-S3-T11: Contrato de importación idempotente.
+   * Recibe un reporte revisado y garantiza que múltiples invocaciones no dupliquen
+   * registros ni corrompan el estado.
+   */
+  async importarReporteRevisado(numero: string, usuario = 'sistema'): Promise<{
+    status: 'ya_importado' | 'importado_exitoso';
+    numero_reporte: string;
+    mensaje: string;
+    reporte: any;
+  }> {
+    const fila = await this.buscarFila(numero);
+    const campos = construirCampos(fila.campos_extraidos);
+    const pendientes = campos.filter((c) => c.estado_revision === 'pendiente');
+
+    if (pendientes.length > 0) {
+      throw new BadRequestException(
+        `El reporte N° ${numero} aún tiene ${pendientes.length} campo(s) pendiente(s) de revisión.`,
+      );
+    }
+
+    if (fila.bloqueado || fila.estado_reporte === 'cerrado' || fila.estado_reporte === 'aprobado_rptech') {
+      const actual = await this.obtener(numero);
+      return {
+        status: 'ya_importado',
+        numero_reporte: numero,
+        mensaje: `El reporte N° ${numero} ya se encontraba cerrado e importado previamente.`,
+        reporte: actual,
+      };
+    }
+
+    const ahora = new Date().toISOString();
+    const vinculos = await this.calcularVinculosSugeridos(fila);
+    const updateData: Record<string, any> = {
+      estado_reporte: 'aprobado_rptech',
+      bloqueado: true,
+      importado_en: ahora,
+      datos_originales: fila.datos_originales && Object.keys(fila.datos_originales).length > 0
+        ? fila.datos_originales
+        : (fila.campos_extraidos ?? {}),
+      fecha_correccion: ahora,
+      corregido_por: fila.corregido_por || usuario,
+    };
+    if (!fila.cliente_id && vinculos.cliente?.id && vinculos.cliente.similitud >= 0.85) {
+      updateData.cliente_id = vinculos.cliente.id;
+    }
+    if (!fila.equipo_id && vinculos.equipo?.id && vinculos.equipo.similitud >= 0.85) {
+      updateData.equipo_id = vinculos.equipo.id;
+    }
+    if (!fila.tecnico_perfil_id && vinculos.tecnico?.id && vinculos.tecnico.similitud >= 0.85) {
+      updateData.tecnico_perfil_id = vinculos.tecnico.id;
+    }
+
+    const { error: errorImportar } = await this.client
+      .from('reportes')
+      .update(updateData)
+      .eq('id', fila.id);
+
+    if (errorImportar) {
+      this.logger.error(`No se pudo importar el reporte ${numero}: ${errorImportar.message}`);
+      throw new InternalServerErrorException('No se pudo importar el reporte revisado.');
+    }
+
+    if (fila.escaneo?.id) {
+      await this.client
+        .from('escaneos')
+        .update({ estado: 'completo' })
+        .eq('id', fila.escaneo.id);
+    }
+
+    this.eventos?.emitirCambio('actualizado', numero);
+    const actualizado = await this.obtener(numero);
+
+    return {
+      status: 'importado_exitoso',
+      numero_reporte: numero,
+      mensaje: `Reporte N° ${numero} importado y cerrado exitosamente de forma idempotente.`,
+      reporte: actualizado,
+    };
+  }
+
+  /**
+   * SIREP-S3-T13: Pasa en lote los reportes ya revisados (sin campos pendientes) a estado
+   * cerrado/importado en producción sin volver a escanearlos ni consumir tokens de IA.
+   */
+  async importarReportesRevisadosEnLote(usuario = 'sistema'): Promise<{
+    totalRevisadosListos: number;
+    importadosNuevos: number;
+    yaImportados: number;
+    pendientesOmitidos: number;
+    numerosImportados: string[];
+  }> {
+    const { data, error } = await this.client
+      .from('reportes')
+      .select(SELECCION)
+      .eq('empresa_id', EMPRESA_POR_DEFECTO)
+      .order('creado_en', { ascending: true })
+      .limit(2000);
+
+    if (error) {
+      this.logger.error(`No se pudieron cargar los reportes para lote: ${error.message}`);
+      throw new InternalServerErrorException('No se pudieron cargar los reportes para importación en lote.');
+    }
+
+    const filas = (Array.isArray(data) ? data : []) as FilaReporte[];
+    let totalRevisadosListos = 0;
+    let importadosNuevos = 0;
+    let yaImportados = 0;
+    let pendientesOmitidos = 0;
+    const numerosImportados: string[] = [];
+
+    for (const fila of filas) {
+      const campos = construirCampos(fila.campos_extraidos);
+      const tienePendientes = campos.some((c) => c.estado_revision === 'pendiente');
+      if (tienePendientes) {
+        pendientesOmitidos++;
+        continue;
+      }
+
+      totalRevisadosListos++;
+      if (fila.bloqueado || fila.estado_reporte === 'aprobado_rptech' || fila.estado_reporte === 'cerrado') {
+        yaImportados++;
+        continue;
+      }
+
+      const ahora = new Date().toISOString();
+      const numero = numeroVisible(fila);
+      const vinculos = await this.calcularVinculosSugeridos(fila);
+      const updateData: Record<string, any> = {
+        estado_reporte: 'aprobado_rptech',
+        bloqueado: true,
+        importado_en: ahora,
+        datos_originales: fila.datos_originales && Object.keys(fila.datos_originales).length > 0
+          ? fila.datos_originales
+          : (fila.campos_extraidos ?? {}),
+        fecha_correccion: fila.fecha_correccion || ahora,
+        corregido_por: fila.corregido_por || usuario,
+      };
+      if (!fila.cliente_id && vinculos.cliente?.id && vinculos.cliente.similitud >= 0.85) {
+        updateData.cliente_id = vinculos.cliente.id;
+      }
+      if (!fila.equipo_id && vinculos.equipo?.id && vinculos.equipo.similitud >= 0.85) {
+        updateData.equipo_id = vinculos.equipo.id;
+      }
+      if (!fila.tecnico_perfil_id && vinculos.tecnico?.id && vinculos.tecnico.similitud >= 0.85) {
+        updateData.tecnico_perfil_id = vinculos.tecnico.id;
+      }
+
+      const { error: errUpd } = await this.client.from('reportes').update(updateData).eq('id', fila.id);
+      if (errUpd) {
+        this.logger.warn(`No se pudo cerrar el reporte ${numero} en lote: ${errUpd.message}`);
+        continue;
+      }
+
+      if (fila.escaneo?.id) {
+        await this.client.from('escaneos').update({ estado: 'completo' }).eq('id', fila.escaneo.id);
+      }
+
+      importadosNuevos++;
+      numerosImportados.push(numero);
+      this.eventos?.emitirCambio('actualizado', numero);
+    }
+
+    return {
+      totalRevisadosListos,
+      importadosNuevos,
+      yaImportados,
+      pendientesOmitidos,
+      numerosImportados,
+    };
+  }
+
+  /**
+   * SIREP-S3-T18: Genera métricas agregadas por campo (confirmados, corregidos, ilegibles y
+   * confianza declarada) sin incluir ningún dato de clientes.
+   */
+  async obtenerMetricasCampos(): Promise<{
+    fecha: string;
+    totalReportes: number;
+    metricas: Array<{
+      campo: string;
+      total: number;
+      confirmados: number;
+      corregidos: number;
+      ilegibles: number;
+      confianza_declarada: string;
+    }>;
+    csv: string;
+  }> {
+    const { data, error } = await this.client
+      .from('reportes')
+      .select('campos_extraidos')
+      .eq('empresa_id', EMPRESA_POR_DEFECTO)
+      .limit(5000);
+
+    if (error) {
+      this.logger.error(`No se pudieron calcular métricas por campo: ${error.message}`);
+      throw new InternalServerErrorException('No se pudieron calcular las métricas por campo.');
+    }
+
+    const filas = Array.isArray(data) ? data : [];
+    const contadores = new Map<
+      string,
+      { total: number; confirmados: number; corregidos: number; ilegibles: number; alta: number; media: number; baja: number }
+    >();
+
+    for (const id of IDS_CAMPOS_FORMULARIO) {
+      contadores.set(id, { total: 0, confirmados: 0, corregidos: 0, ilegibles: 0, alta: 0, media: 0, baja: 0 });
+    }
+
+    for (const fila of filas) {
+      const campos = construirCampos((fila as any)?.campos_extraidos);
+      for (const c of campos) {
+        const entry = contadores.get(c.id);
+        if (!entry) continue;
+        entry.total++;
+        if (c.estado_revision === 'confirmado' || c.estado_revision === 'auto') {
+          entry.confirmados++;
+        } else if (c.estado_revision === 'corregido') {
+          entry.corregidos++;
+        } else if (c.estado_revision === 'ilegible' || c.no_leido) {
+          entry.ilegibles++;
+        }
+        if (c.confianza === 'alta') entry.alta++;
+        else if (c.confianza === 'media') entry.media++;
+        else if (c.confianza === 'baja') entry.baja++;
+      }
+    }
+
+    const metricas = IDS_CAMPOS_FORMULARIO.map((campo) => {
+      const c = contadores.get(campo)!;
+      return {
+        campo,
+        total: c.total,
+        confirmados: c.confirmados,
+        corregidos: c.corregidos,
+        ilegibles: c.ilegibles,
+        confianza_declarada: `alta:${c.alta}|media:${c.media}|baja:${c.baja}`,
+      };
+    });
+
+    const lineas = [
+      'campo,total,confirmados,corregidos,ilegibles,confianza_declarada',
+      ...metricas.map(
+        (m) => `${m.campo},${m.total},${m.confirmados},${m.corregidos},${m.ilegibles},${m.confianza_declarada}`,
+      ),
+    ];
+
+    return {
+      fecha: new Date().toISOString().slice(0, 10),
+      totalReportes: filas.length,
+      metricas,
+      csv: `${lineas.join('\n')}\n`,
+    };
+  }
+
+  /**
    * SIREP-S3-T05: Exportación a Excel (.xlsx o .csv con BOM UTF-8) con todos los campos,
-   * los 10 vitales primero, y nombres de columna acordados con RP-TECH.
    */
   async exportarReportes(formato: 'xlsx' | 'csv' = 'xlsx'): Promise<{
     buffer: Buffer;

@@ -273,4 +273,16 @@ describe('EscaneosService', () => {
     expect(deletes).toContain('escaneos');
     expect(remove).toHaveBeenCalledTimes(1);
   });
+
+  it('en modo revisión completa inicial (primeros 30 reportes, T18) marca todos los campos leídos para revisión', async () => {
+    const prev = process.env.REVISION_COMPLETA_PRIMEROS_N;
+    process.env.REVISION_COMPLETA_PRIMEROS_N = '30';
+    try {
+      const r = await service.procesarEscaneo({ buffer: png, filename: '000845.png' });
+      expect(r.camposDudosos).toEqual(['tecnico', 'empresa', 'fecha', 'procedimiento', 'codigo_repuesto']);
+    } finally {
+      if (prev === undefined) delete process.env.REVISION_COMPLETA_PRIMEROS_N;
+      else process.env.REVISION_COMPLETA_PRIMEROS_N = prev;
+    }
+  });
 });

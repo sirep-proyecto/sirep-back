@@ -930,7 +930,13 @@ export function similitudTexto(a: string, b: string): number {
   return total === 0 ? 0 : (2.0 * interseccion) / total;
 }
 
-export type ResultadoComparacion = 'correcto' | 'error' | 'no leído' | 'vacío correcto' | 'dudoso';
+export type ResultadoComparacion =
+  | 'correcto'
+  | 'error'
+  | 'no leído'
+  | 'vacío correcto'
+  | 'dudoso'
+  | 'sin referencia';
 
 export interface EvaluacionCampo {
   resultado: ResultadoComparacion;
@@ -941,7 +947,9 @@ export interface EvaluacionCampo {
 
 /**
  * Compara el valor extraído por el modelo contra la plantilla de referencia manual.
- * Aplica las reglas del Sprint 2:
+ * Aplica las reglas del Sprint 3 (SIREP-S3-T15):
+ * - Si falta el valor de control en la plantilla de referencia, el campo se marca "sin referencia"
+ *   y NO se usa el valor del modelo como si fuera correcto.
  * - "vacío" o en blanco esperado vs noLeido/vacio => vacío correcto
  * - "ilegible" esperado vs noLeido => correcto
  * - Formatos normalizados para fecha y hora
@@ -954,15 +962,24 @@ export function compararCampo(
   valorLeidoRaw: unknown,
   noLeido: boolean,
 ): EvaluacionCampo {
+  const valorLeidoStr = valorLeidoRaw === null || valorLeidoRaw === undefined ? '' : String(valorLeidoRaw).trim();
+  const leidoNorm = normalizarTexto(valorLeidoRaw);
+  const esVacioLeido = noLeido || leidoNorm === '' || leidoNorm === 'null' || leidoNorm === 'undefined';
+
+  // SIREP-S3-T15: Si la plantilla de control no tiene valor (undefined o null), se marca "sin referencia"
+  if (valorEsperadoRaw === undefined || valorEsperadoRaw === null) {
+    return {
+      resultado: 'sin referencia',
+      valorEsperado: '(sin referencia)',
+      valorLeido: esVacioLeido ? '(vacío)' : valorLeidoStr,
+    };
+  }
+
   const esperadoNorm = normalizarTexto(valorEsperadoRaw);
   const esVacioEsperado = esperadoNorm === '' || esperadoNorm === 'vacio' || esperadoNorm === 'vacío' || esperadoNorm === 'n/a';
   const esIlegibleEsperado = esperadoNorm === 'ilegible';
 
-  const leidoNorm = normalizarTexto(valorLeidoRaw);
-  const esVacioLeido = noLeido || leidoNorm === '' || leidoNorm === 'null' || leidoNorm === 'undefined';
-
   const valorEsperadoStr = String(valorEsperadoRaw ?? '').trim();
-  const valorLeidoStr = valorLeidoRaw === null || valorLeidoRaw === undefined ? '' : String(valorLeidoRaw).trim();
 
   // Caso 1: Se esperaba vacío en el papel
   if (esVacioEsperado) {
