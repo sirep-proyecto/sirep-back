@@ -2,18 +2,15 @@
 FROM node:22-slim AS build
 WORKDIR /app
 
-# La versión de pnpm coincide con "packageManager" de package.json.
-RUN npm install -g pnpm@11.5.3
+COPY package.json package-lock.json ./
+RUN npm ci
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY tsconfig.json nest-cli.json ./
+COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY src ./src
-RUN pnpm run build
+RUN npm run build
 
 # Deja solo las dependencias de producción para la imagen final.
-RUN rm -rf node_modules && pnpm install --frozen-lockfile --prod
+RUN npm prune --omit=dev
 
 # ---------- Etapa 2: imagen final ----------
 FROM node:22-slim AS runtime

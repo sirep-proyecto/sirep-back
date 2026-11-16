@@ -5,7 +5,6 @@ dist
 !.env.example
 .git
 *.md
-package-lock.json
 muestra
 muestras
 data

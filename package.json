@@ -2,7 +2,6 @@
   "name": "sirep-back",
   "version": "1.0.0",
   "private": true,
-  "packageManager": "pnpm@11.5.3",
   "scripts": {
     "prebuild": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
     "build": "nest build",
