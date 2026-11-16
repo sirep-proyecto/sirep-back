@@ -1,22 +1,29 @@
 #!/usr/bin/env node
 /**
- * SIREP-S3-T13: Script para pasar en lote los reportes ya revisados en SIREP
- * a estado cerrado/importado (bloqueado = true, estado_reporte = 'aprobado_rptech')
- * de forma idempotente, sin volver a escanear ni invocar modelos de IA.
+ * Envía en lote a RP-TECH los reportes históricos ya revisados en SIREP
+ * (sin campos pendientes) que aún no están allá. Contrato: docs/contrato-historico.md.
+ *
+ * Antes este script marcaba `aprobado_rptech` sin enviar nada a RP-TECH. Ahora el
+ * reporte solo queda como importado cuando RP-TECH confirma que lo guardó
+ * (201 creado o 200 ya_existia). Reenviar es seguro: RP-TECH no duplica el mismo sirep_id.
  *
  * Uso:
  *   node --env-file=.env scripts/migrar-revisados-rptech.mjs [--dry-run]
+ *   (o npm run db:migrar-revisados)
+ *
+ * Necesita SUPABASE_URL, SUPABASE_KEY, RPTECH_URL y RPTECH_CLAVE.
+ * --dry-run: arma cada envío y muestra cuántos irían, sin enviar ni cambiar nada.
  */
 
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { createClient } from '@supabase/supabase-js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.resolve(__dirname, '../.env');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const raiz = path.resolve(__dirname, '..');
+const envPath = path.join(raiz, '.env');
 
 if (fs.existsSync(envPath)) {
   for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
@@ -24,76 +31,45 @@ if (fs.existsSync(envPath)) {
     if (t && !t.startsWith('#') && t.includes('=')) {
       const idx = t.indexOf('=');
       const key = t.slice(0, idx).trim();
-      const val = t.slice(idx + 1).trim();
-      if (!process.env[key]) process.env[key] = val;
+      if (!process.env[key]) process.env[key] = t.slice(idx + 1).trim();
     }
   }
 }
 
 const dryRun = process.argv.includes('--dry-run');
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
 const EMPRESA_POR_DEFECTO = '00000000-0000-0000-0000-000000000000';
 
-if (!supabaseUrl || !supabaseKey) {
-  console.error('Faltan SUPABASE_URL o SUPABASE_KEY en las variables de entorno.');
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
+  console.error('Faltan SUPABASE_URL o SUPABASE_KEY en .env');
   process.exit(1);
 }
 
-let mapperMod;
-let normMod;
+// Usa el mismo código que la API (compilado en dist) para no tener dos versiones del envío.
+const modulo = (rel) => import(pathToFileURL(path.join(raiz, rel)).href);
+let mapper, cliente, envio;
+const cargar = async () => {
+  mapper = await modulo('dist/reportes/reportes.mapper.js');
+  cliente = await modulo('dist/rptech/rptech.cliente.js');
+  envio = await modulo('dist/rptech/rptech.envio.js');
+};
 try {
-  mapperMod = await import('../dist/reportes/reportes.mapper.js');
-  normMod = await import('../dist/ia-extractor/normalizacion.js');
+  await cargar();
 } catch {
-  execSync('npm run build', { stdio: 'inherit', cwd: path.resolve(__dirname, '..') });
-  mapperMod = await import('../dist/reportes/reportes.mapper.js');
-  normMod = await import('../dist/ia-extractor/normalizacion.js');
+  execSync('npm run build', { stdio: 'inherit', cwd: raiz });
+  await cargar();
 }
 
-const { construirCampos, numeroVisible } = mapperMod;
-const { similitudTexto } = normMod;
-
-const client = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
-
-async function cargarCatalogo(tabla) {
-  try {
-    const { data, error } = await client
-      .from(tabla)
-      .select('id, nombre')
-      .eq('empresa_id', EMPRESA_POR_DEFECTO)
-      .limit(1000);
-    if (error || !Array.isArray(data)) return [];
-    return data.filter((r) => r?.id && r?.nombre);
-  } catch {
-    return [];
-  }
+const cfg = cliente.configDesdeEntorno(process.env);
+if (!cfg && !dryRun) {
+  console.error('Faltan RPTECH_URL o RPTECH_CLAVE en .env: no se envía nada.');
+  process.exit(1);
 }
 
-function buscarVinculoOptimo(texto, catalogo) {
-  const limpio = (texto || '').trim();
-  if (!limpio || catalogo.length === 0) return null;
-  let mejor = null;
-  let mejorScore = 0;
-  for (const item of catalogo) {
-    const s = similitudTexto(limpio, item.nombre);
-    if (s >= 0.85 && s > mejorScore) {
-      mejorScore = s;
-      mejor = item.id;
-    }
-  }
-  return mejor;
-}
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, { auth: { persistSession: false } });
 
-const [clientesCat, equiposCat, perfilesCat] = await Promise.all([
-  cargarCatalogo('clientes'),
-  cargarCatalogo('equipos'),
-  cargarCatalogo('perfiles'),
-]);
-
-const { data: filas, error } = await client
+const { data: filas, error } = await supabase
   .from('reportes')
-  .select('id, escaneo_id, numero_talonario, origen, estado_reporte, bloqueado, cliente, serie_equipo, tecnico_asignado, cliente_id, equipo_id, tecnico_perfil_id, campos_extraidos, datos_originales, corregido_por, fecha_correccion')
+  .select('*, escaneo:escaneos(id, ruta_original, paginas, enviado_por, estado, creado_en)')
   .eq('empresa_id', EMPRESA_POR_DEFECTO)
   .eq('origen', 'historico')
   .order('creado_en', { ascending: true })
@@ -104,77 +80,56 @@ if (error) {
   process.exit(1);
 }
 
-let listos = 0;
-let yaCerrados = 0;
-let migrados = 0;
-let omitidosPendientes = 0;
+const cuenta = { listos: 0, yaEnRptech: 0, pendientes: 0, creados: 0, yaExistian: 0, observados: [], reintentar: [] };
 
-for (const fila of filas || []) {
-  const campos = construirCampos(fila.campos_extraidos);
-  const pendientes = campos.filter((c) => c.estado_revision === 'pendiente');
-  if (pendientes.length > 0) {
-    omitidosPendientes++;
+for (const fila of filas ?? []) {
+  const numero = mapper.numeroVisible(fila);
+  const tienePendientes = mapper.construirCampos(fila.campos_extraidos).some((c) => c.estado_revision === 'pendiente');
+  if (tienePendientes) {
+    cuenta.pendientes++;
     continue;
   }
-
-  listos++;
-  if (fila.bloqueado || fila.estado_reporte === 'aprobado_rptech' || fila.estado_reporte === 'cerrado') {
-    yaCerrados++;
+  if (!cliente.listoParaEnviar(fila, false)) {
+    cuenta.yaEnRptech++;
     continue;
   }
-
-  const numero = numeroVisible(fila);
-  const ahora = new Date().toISOString();
-  const payload = {
-    estado_reporte: 'aprobado_rptech',
-    bloqueado: true,
-    importado_en: ahora,
-    datos_originales:
-      fila.datos_originales && Object.keys(fila.datos_originales).length > 0
-        ? fila.datos_originales
-        : (fila.campos_extraidos ?? {}),
-    corregido_por: fila.corregido_por || 'migracion-lote',
-    fecha_correccion: fila.fecha_correccion || ahora,
-  };
-
-  if (!fila.cliente_id) {
-    const cid = buscarVinculoOptimo(fila.cliente, clientesCat);
-    if (cid) payload.cliente_id = cid;
-  }
-  if (!fila.equipo_id) {
-    const eid = buscarVinculoOptimo(fila.serie_equipo, equiposCat);
-    if (eid) payload.equipo_id = eid;
-  }
-  if (!fila.tecnico_perfil_id) {
-    const tid = buscarVinculoOptimo(fila.tecnico_asignado, perfilesCat);
-    if (tid) payload.tecnico_perfil_id = tid;
-  }
+  cuenta.listos++;
 
   if (dryRun) {
-    console.log(`[DRY-RUN] Reporte N° ${numero} listo para cierre e importación idempotente.`);
-    migrados++;
+    const prueba = envio.construirEnvio(fila, { tipo: 'application/pdf', sha256: '0'.repeat(64), paginas: 1, contenido_base64: '' });
+    const sinFormato = Object.keys(prueba.datos_originales);
+    console.log(`[DRY-RUN] N° ${numero} se enviaría.${sinFormato.length ? ` Sin formato (van en datos_originales): ${sinFormato.join(', ')}` : ''}`);
     continue;
   }
 
-  const { error: errUpd } = await client.from('reportes').update(payload).eq('id', fila.id);
-  if (errUpd) {
-    console.error(`Error actualizando reporte N° ${numero}: ${errUpd.message}`);
-    continue;
+  const r = await cliente.enviarReporte(supabase, fila, cfg);
+  if (r.estado === 'clave_invalida') {
+    console.error('RP-TECH rechazó la clave (401). Revisa RPTECH_CLAVE. Se detiene el lote.');
+    process.exit(1);
   }
-
-  if (fila.escaneo_id) {
-    await client.from('escaneos').update({ estado: 'completo' }).eq('id', fila.escaneo_id);
+  if (r.estado === 'importado') {
+    if (r.yaExistia) cuenta.yaExistian++;
+    else cuenta.creados++;
+    console.log(`N° ${numero}: ${r.yaExistia ? 'ya estaba' : 'guardado'} en RP-TECH (${r.rptechId}).`);
+  } else if (r.estado === 'observado') {
+    cuenta.observados.push(numero);
+    console.warn(`N° ${numero}: RP-TECH no lo aceptó (${r.codigo}): ${JSON.stringify(r.detalle)}`);
+  } else {
+    cuenta.reintentar.push(numero);
+    console.warn(`N° ${numero}: sin respuesta, se reintenta en la próxima ejecución. ${r.detalle}`);
   }
-
-  console.log(`Reporte N° ${numero} cerrado e importado correctamente.`);
-  migrados++;
 }
 
 console.log('='.repeat(60));
-console.log(`Modo: ${dryRun ? 'SIMULACION (--dry-run)' : 'PRODUCCION'}`);
-console.log(`Total reportes históricos en BD: ${(filas || []).length}`);
-console.log(`Listos sin campos pendientes:    ${listos}`);
-console.log(`Ya cerrados previamente:         ${yaCerrados}`);
-console.log(`Cerrados/migrados en esta ejecución: ${migrados}`);
-console.log(`Omitidos por tener pendientes:   ${omitidosPendientes}`);
+console.log(`Modo: ${dryRun ? 'SIMULACIÓN (--dry-run)' : 'ENVÍO A RP-TECH'}`);
+console.log(`Históricos en SIREP:              ${(filas ?? []).length}`);
+console.log(`Con campos pendientes (no van):   ${cuenta.pendientes}`);
+console.log(`Ya en RP-TECH antes:              ${cuenta.yaEnRptech}`);
+console.log(`Listos para enviar:               ${cuenta.listos}`);
+if (!dryRun) {
+  console.log(`Guardados ahora en RP-TECH:       ${cuenta.creados}`);
+  console.log(`Ya existían en RP-TECH:           ${cuenta.yaExistian}`);
+  console.log(`Observados (corregir en bandeja): ${cuenta.observados.length} ${cuenta.observados.join(', ')}`);
+  console.log(`Por reintentar:                   ${cuenta.reintentar.length} ${cuenta.reintentar.join(', ')}`);
+}
 console.log('='.repeat(60));

@@ -94,6 +94,26 @@ El frontend (`sirep-front`, puerto 3001) consume estos endpoints. Los datos son 
 - Si dos personas corrigen a la vez, la segunda recibe un `409` y no pisa el trabajo de la primera.
 - Los reportes sin N° legible se abren con `SN-` + los 8 primeros caracteres de su id.
 
+## 📤 Envío del histórico a RP-TECH
+
+El reporte aprobado vive en RP-TECH. SIREP lo envía a la función `importar-historico` de RP-TECH según el contrato [docs/contrato-historico.md](docs/contrato-historico.md) (versión 1).
+
+- **Configuración:** `RPTECH_URL` y `RPTECH_CLAVE` en `.env` (la clave la entrega RP-TECH por privado). Sin las dos no se envía nada y nada se marca como importado.
+- **Cuándo se envía:** al terminar de revisar un reporte histórico en la bandeja (si `RPTECH_ENVIO_AUTOMATICO` no es `false`), con `PATCH /reportes/:numero/importar`, o en lote con `POST /reportes/importar-lote` o `npm run db:migrar-revisados` (`-- --dry-run` para simular).
+- **Qué se marca:** `aprobado_rptech`, `bloqueado` e `importado_en` solo cuando RP-TECH responde que lo guardó; además se guarda `rptech_id`. Si RP-TECH lo rechaza (talonario repetido o datos que no cumplen el contrato), queda `observado` con el motivo en `rptech_error`. Sin conexión, queda como estaba para reintentar.
+- **Qué no se envía:** los ids de las tablas propias de SIREP (`cliente_id`, `equipo_id`, `tecnico_perfil_id`) ni `empresa_id`. El vínculo con los clientes reales lo hace RP-TECH.
+- **Código:** `src/rptech/rptech.envio.ts` (conversión al contrato) y `src/rptech/rptech.cliente.ts` (envío y respuesta), con sus pruebas.
+- **Reabrir:** un reporte que ya está en RP-TECH no se reabre, porque allá entra cerrado.
+
+## ⚙️ Configuración del bot desde la app
+
+En **Configuración → Bot de Telegram** se ve el bot, a qué dirección le manda Telegram los mensajes, cuántos hay en cola y el último error. Si la dirección pública del backend cambia (otro túnel de ngrok, otro dominio), se escribe la nueva y se toca **Volver a conectar**; **Desconectar** quita el webhook (Telegram guarda los mensajes hasta que se vuelva a conectar). Es lo mismo que `npm run telegram:webhook`, sin entrar al servidor.
+
+- API: `GET /configuracion/bot`, `PUT /configuracion/bot` con `{ "url": "https://..." }` y `DELETE /configuracion/bot`.
+- Antes de conectar se comprueba que la dirección escrita **llegue a este mismo backend** (`GET /configuracion/bot/eco/:codigo` con un código de un solo uso). Así nadie puede desviar las fotos de los reportes a otro servidor desde la pantalla.
+- Solo https. Los mensajes en cola no se pierden.
+- Lo cambian los roles de `BOT_CONFIG_ROLES` (por defecto `admin,operador`); los demás solo lo ven.
+
 ## 🧪 Pruebas Unitarias
 El proyecto cuenta con suites de pruebas unitarias completas con mocks (sin costo de API):
 

@@ -1,4 +1,5 @@
-import { BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
 import { ReportesService } from './reportes.service';
@@ -297,7 +298,14 @@ describe('ReportesService', () => {
     });
   });
 
-  describe('SIREP-S3-T10 y T11: Vinculación e importación idempotente', () => {
+  describe('SIREP-S3-T10 y T11: Vinculación y envío a RP-TECH', () => {
+    // RP-TECH simulado: el envío real se prueba en rptech.cliente.spec.ts
+    function conRptech(resultado: any = { estado: 'importado', rptechId: 'rt-1', yaExistia: false }) {
+      const enviar = jest.fn(async () => resultado);
+      const rptech = { configurado: () => true, enviar } as unknown as RptechService;
+      return { enviar, svc: new ReportesService(crearSupabase(), undefined, rptech) };
+    }
+
     it('calcula sugerencias de vinculación por similitud (T10)', async () => {
       filas = [fila({ cliente: 'Industrial Go Service', serie_equipo: 'UV DTF 60', tecnico_asignado: 'Carlos' })];
       const r = await service.obtener('000214');
@@ -306,20 +314,42 @@ describe('ReportesService', () => {
 
     it('rechaza importar si aún tiene campos pendientes (T11)', async () => {
       filas = [fila({}, ['codigo_repuesto'])];
-      await expect(service.importarReporteRevisado('000214')).rejects.toThrow(
-        BadRequestException,
-      );
+      await expect(conRptech().svc.importarReporteRevisado('000214')).rejects.toThrow(BadRequestException);
     });
 
-    it('importa de forma idempotente un reporte sin pendientes (T11)', async () => {
-      filas = [fila({}, [])]; // sin campos dudosos pendientes
-      const res1 = await service.importarReporteRevisado('000214');
+    it('envía a RP-TECH y no vuelve a enviar lo ya importado (T11)', async () => {
+      const { svc, enviar } = conRptech();
+      filas = [fila({}, [])];
+      const res1 = await svc.importarReporteRevisado('000214');
       expect(res1.status).toBe('importado_exitoso');
+      expect(enviar).toHaveBeenCalledTimes(1);
 
-      // Segunda llamada: debe responder ya_importado sin duplicar
       filas[0].estado_reporte = 'aprobado_rptech';
-      const res2 = await service.importarReporteRevisado('000214');
+      const res2 = await svc.importarReporteRevisado('000214');
       expect(res2.status).toBe('ya_importado');
+      expect(enviar).toHaveBeenCalledTimes(1);
+    });
+
+    it('sin RPTECH_URL ni RPTECH_CLAVE no marca nada como importado', async () => {
+      filas = [fila({}, [])];
+      await expect(service.importarReporteRevisado('000214')).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(actualizaciones.some((a) => a.datos.estado_reporte === 'aprobado_rptech')).toBe(false);
+    });
+
+    it('si RP-TECH lo rechaza, avisa con el motivo', async () => {
+      filas = [fila({}, [])];
+      const { svc } = conRptech({ estado: 'observado', codigo: 'datos_invalidos', detalle: { voltaje_ln: 'número' } });
+      await expect(svc.importarReporteRevisado('000214')).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('no reabre un reporte que RP-TECH ya guardó', async () => {
+      filas = [fila({ bloqueado: true, estado_reporte: 'aprobado_rptech', rptech_id: 'rt-1' }, [])];
+      filas[0].campos_extraidos!.empresa.revision = {
+        estado: 'confirmado', valor_corregido: null, revisado_por: 'David', revisado_en: null, corregido_por: null, corregido_en: null,
+      };
+      await expect(
+        service.revisarCampo('000214', 'empresa', { tipo: 'reabrir', actor: 'David' } as any),
+      ).rejects.toBeInstanceOf(ConflictException);
     });
   });
 
@@ -342,23 +372,27 @@ describe('ReportesService', () => {
       expect(r.cliente).toBe('Abregu');
     });
 
-    it('pasa en lote los reportes sin pendientes sin re-escanear y respalda datos_originales (T13)', async () => {
+    it('envía en lote solo los revisados que faltan y cuenta los rechazados (T13)', async () => {
       const listo = fila({ id: 'rep-1', numero_talonario: '000214', estado_reporte: 'aprobado' }, []);
       const yaCerrado = fila({ id: 'rep-2', numero_talonario: '000215', estado_reporte: 'aprobado_rptech', bloqueado: true }, []);
       const conPendiente = fila({ id: 'rep-3', numero_talonario: '000216' }, ['codigo_repuesto']);
-      filas = [listo, yaCerrado, conPendiente];
+      const rechazado = fila({ id: 'rep-4', numero_talonario: '000217', estado_reporte: 'aprobado' }, []);
+      filas = [listo, yaCerrado, conPendiente, rechazado];
 
-      const res = await service.importarReportesRevisadosEnLote('Valentino');
-      expect(res.totalRevisadosListos).toBe(2);
+      const enviar = jest.fn(async (f: any) =>
+        f.id === 'rep-4'
+          ? { estado: 'observado', codigo: 'talonario_duplicado', detalle: 'repetido' }
+          : { estado: 'importado', rptechId: 'rt-1', yaExistia: false });
+      const svc = new ReportesService(crearSupabase(), undefined, { configurado: () => true, enviar } as unknown as RptechService);
+
+      const res = await svc.importarReportesRevisadosEnLote('Valentino');
+      expect(enviar).toHaveBeenCalledTimes(2);
+      expect(res.totalRevisadosListos).toBe(3);
       expect(res.importadosNuevos).toBe(1);
       expect(res.yaImportados).toBe(1);
       expect(res.pendientesOmitidos).toBe(1);
       expect(res.numerosImportados).toEqual(['000214']);
-
-      const upd = actualizaciones.find((a) => a.tabla === 'reportes' && a.filtros.id === 'rep-1')!;
-      expect(upd.datos.bloqueado).toBe(true);
-      expect(upd.datos.estado_reporte).toBe('aprobado_rptech');
-      expect(upd.datos.datos_originales).toBeDefined();
+      expect(res.observados).toEqual(['000217']);
     });
 
     it('genera métricas diarias por campo con las columnas exigidas y cero datos de clientes (T18)', async () => {

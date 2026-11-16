@@ -9,6 +9,7 @@ import { AppController } from './app.controller';
 import { CommonModule } from './common/common.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { AuthModule } from './auth/auth.module';
+import { ConfiguracionModule } from './configuracion/configuracion.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { AuthModule } from './auth/auth.module';
     EscaneosModule,
     ReportesModule,
     TelegramModule,
+    ConfiguracionModule,
   ],
   controllers: [AppController, HealthController],
 })

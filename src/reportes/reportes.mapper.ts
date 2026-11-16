@@ -138,6 +138,10 @@ export interface FilaReporte {
   bloqueado?: boolean | null;
   datos_originales?: Record<string, any> | null;
   importado_en?: string | null;
+  /** id del reporte en RP-TECH, cuando RP-TECH confirmó que lo guardó. */
+  rptech_id?: string | null;
+  rptech_error?: { codigo: string; detalle: unknown } | null;
+  rptech_enviado_en?: string | null;
   cliente_id?: string | null;
   equipo_id?: string | null;
   tecnico_perfil_id?: string | null;
@@ -197,6 +201,10 @@ export function aReporteContrato(
     equipo_id: fila.equipo_id ?? null,
     tecnico_perfil_id: fila.tecnico_perfil_id ?? null,
     importado_en: fila.importado_en ?? null,
+    // Envío a RP-TECH: id allá, último rechazo o fallo (para mostrar el motivo en la bandeja) y fecha del intento.
+    rptech_id: fila.rptech_id ?? null,
+    rptech_error: fila.rptech_error ?? null,
+    rptech_enviado_en: fila.rptech_enviado_en ?? null,
     diseno_talonario: DISENO_TALONARIO,
     vinculos_sugeridos: vinculos ?? {
       cliente: null,

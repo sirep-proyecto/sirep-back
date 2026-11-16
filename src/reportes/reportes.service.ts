@@ -6,7 +6,9 @@ import {
   Logger,
   NotFoundException,
   Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
@@ -57,6 +59,8 @@ export class ReportesService {
     private readonly supabase: SupabaseService,
     // Opcional para que las pruebas unitarias no necesiten el canal en vivo
     @Optional() private readonly eventos?: EventosGateway,
+    // Envío del histórico a RP-TECH (docs/contrato-historico.md)
+    @Optional() private readonly rptech?: RptechService,
   ) { }
 
   private get client() {
@@ -192,6 +196,11 @@ export class ReportesService {
     if (estaBloqueado && accion.tipo !== 'reabrir') {
       throw new ConflictException(`El reporte histórico N° ${numero} ya está cerrado y bloqueado. Reabre el campo antes de editarlo.`);
     }
+    // Un reporte que RP-TECH ya guardó no se reabre: allá entra cerrado y no se modifica,
+    // así que una corrección aquí ya no llegaría y las dos bases quedarían distintas.
+    if (accion.tipo === 'reabrir' && fila.rptech_id) {
+      throw new ConflictException(`El reporte N° ${numero} ya está en RP-TECH y no se puede reabrir.`);
+    }
 
     const guardados: Record<string, CampoGuardado> = { ...(fila.campos_extraidos ?? {}) };
     const camposActuales = construirCampos(guardados);
@@ -271,7 +280,36 @@ export class ReportesService {
 
     this.eventos?.emitirCambio('actualizado', numero);
 
+    // Revisado por completo: se envía solo a RP-TECH (si está activado).
+    if (pendientes.length === 0 && fila.origen === 'historico' && this.envioAutomatico()) {
+      void this.enviarEnSegundoPlano(numero);
+    }
+
     return this.obtener(numero);
+  }
+
+  private envioAutomatico(): boolean {
+    return Boolean(this.rptech?.configurado()) && (process.env.RPTECH_ENVIO_AUTOMATICO ?? 'true').trim() !== 'false';
+  }
+
+  /** No hace esperar al revisor: el resultado se ve en la bandeja por el canal en vivo. */
+  private async enviarEnSegundoPlano(numero: string) {
+    try {
+      const fila = await this.buscarFila(numero);
+      const pendientes = construirCampos(fila.campos_extraidos).some((c) => c.estado_revision === 'pendiente');
+      if (pendientes || fila.bloqueado || fila.estado_reporte === 'aprobado_rptech') return;
+      await this.rptech!.enviar(fila);
+      this.eventos?.emitirCambio('actualizado', numero);
+    } catch (e) {
+      this.logger.warn(`No se pudo enviar ${numero} a RP-TECH: ${(e as Error).message}`);
+    }
+  }
+
+  private exigirEnvio(): RptechService {
+    if (!this.rptech?.configurado()) {
+      throw new ServiceUnavailableException('Falta configurar el envío a RP-TECH (RPTECH_URL y RPTECH_CLAVE).');
+    }
+    return this.rptech;
   }
 
   /**
@@ -305,52 +343,35 @@ export class ReportesService {
       };
     }
 
-    const ahora = new Date().toISOString();
-    const vinculos = await this.calcularVinculosSugeridos(fila);
-    const updateData: Record<string, any> = {
-      estado_reporte: 'aprobado_rptech',
-      bloqueado: true,
-      importado_en: ahora,
-      datos_originales: fila.datos_originales && Object.keys(fila.datos_originales).length > 0
-        ? fila.datos_originales
-        : (fila.campos_extraidos ?? {}),
-      fecha_correccion: ahora,
-      corregido_por: fila.corregido_por || usuario,
-    };
-    if (!fila.cliente_id && vinculos.cliente?.id && vinculos.cliente.similitud >= 0.85) {
-      updateData.cliente_id = vinculos.cliente.id;
-    }
-    if (!fila.equipo_id && vinculos.equipo?.id && vinculos.equipo.similitud >= 0.85) {
-      updateData.equipo_id = vinculos.equipo.id;
-    }
-    if (!fila.tecnico_perfil_id && vinculos.tecnico?.id && vinculos.tecnico.similitud >= 0.85) {
-      updateData.tecnico_perfil_id = vinculos.tecnico.id;
+    if (fila.origen !== 'historico') {
+      throw new BadRequestException(`El reporte N° ${numero} no es histórico: no se envía a RP-TECH.`);
     }
 
-    const { error: errorImportar } = await this.client
-      .from('reportes')
-      .update(updateData)
-      .eq('id', fila.id);
-
-    if (errorImportar) {
-      this.logger.error(`No se pudo importar el reporte ${numero}: ${errorImportar.message}`);
-      throw new InternalServerErrorException('No se pudo importar el reporte revisado.');
+    // Solo se marca como importado cuando RP-TECH confirma que lo guardó.
+    // Los vínculos con las tablas de SIREP no se envían: sus ids no existen en RP-TECH.
+    const resultado = await this.exigirEnvio().enviar(fila);
+    if (resultado.estado === 'clave_invalida') {
+      throw new ServiceUnavailableException('RP-TECH rechazó la clave de SIREP. Revisa RPTECH_CLAVE.');
     }
-
-    if (fila.escaneo?.id) {
-      await this.client
-        .from('escaneos')
-        .update({ estado: 'completo' })
-        .eq('id', fila.escaneo.id);
+    if (resultado.estado === 'reintentar') {
+      throw new ServiceUnavailableException(`No se pudo enviar a RP-TECH; se reintentará. ${resultado.detalle}`);
+    }
+    if (resultado.estado === 'observado') {
+      this.eventos?.emitirCambio('actualizado', numero);
+      throw new ConflictException({
+        message: `RP-TECH no aceptó el reporte N° ${numero}. Corrígelo en la bandeja y vuelve a enviarlo.`,
+        codigo: resultado.codigo,
+        detalle: resultado.detalle,
+      });
     }
 
     this.eventos?.emitirCambio('actualizado', numero);
     const actualizado = await this.obtener(numero);
 
     return {
-      status: 'importado_exitoso',
+      status: resultado.yaExistia ? 'ya_importado' : 'importado_exitoso',
       numero_reporte: numero,
-      mensaje: `Reporte N° ${numero} importado y cerrado exitosamente de forma idempotente.`,
+      mensaje: `Reporte N° ${numero} guardado en RP-TECH y cerrado.`,
       reporte: actualizado,
     };
   }
@@ -365,7 +386,10 @@ export class ReportesService {
     yaImportados: number;
     pendientesOmitidos: number;
     numerosImportados: string[];
+    observados: string[];
+    porReintentar: string[];
   }> {
+    const rptech = this.exigirEnvio();
     const { data, error } = await this.client
       .from('reportes')
       .select(SELECCION)
@@ -384,8 +408,12 @@ export class ReportesService {
     let yaImportados = 0;
     let pendientesOmitidos = 0;
     const numerosImportados: string[] = [];
+    const observados: string[] = [];
+    const porReintentar: string[] = [];
+    void usuario;
 
     for (const fila of filas) {
+      if (fila.origen !== 'historico') continue;
       const campos = construirCampos(fila.campos_extraidos);
       const tienePendientes = campos.some((c) => c.estado_revision === 'pendiente');
       if (tienePendientes) {
@@ -399,37 +427,24 @@ export class ReportesService {
         continue;
       }
 
-      const ahora = new Date().toISOString();
       const numero = numeroVisible(fila);
-      const vinculos = await this.calcularVinculosSugeridos(fila);
-      const updateData: Record<string, any> = {
-        estado_reporte: 'aprobado_rptech',
-        bloqueado: true,
-        importado_en: ahora,
-        datos_originales: fila.datos_originales && Object.keys(fila.datos_originales).length > 0
-          ? fila.datos_originales
-          : (fila.campos_extraidos ?? {}),
-        fecha_correccion: fila.fecha_correccion || ahora,
-        corregido_por: fila.corregido_por || usuario,
-      };
-      if (!fila.cliente_id && vinculos.cliente?.id && vinculos.cliente.similitud >= 0.85) {
-        updateData.cliente_id = vinculos.cliente.id;
+      const resultado = await rptech.enviar(fila);
+      if (resultado.estado === 'clave_invalida') {
+        throw new ServiceUnavailableException('RP-TECH rechazó la clave de SIREP. Revisa RPTECH_CLAVE.');
       }
-      if (!fila.equipo_id && vinculos.equipo?.id && vinculos.equipo.similitud >= 0.85) {
-        updateData.equipo_id = vinculos.equipo.id;
-      }
-      if (!fila.tecnico_perfil_id && vinculos.tecnico?.id && vinculos.tecnico.similitud >= 0.85) {
-        updateData.tecnico_perfil_id = vinculos.tecnico.id;
-      }
-
-      const { error: errUpd } = await this.client.from('reportes').update(updateData).eq('id', fila.id);
-      if (errUpd) {
-        this.logger.warn(`No se pudo cerrar el reporte ${numero} en lote: ${errUpd.message}`);
+      if (resultado.estado === 'observado') {
+        observados.push(numero);
+        this.eventos?.emitirCambio('actualizado', numero);
         continue;
       }
-
-      if (fila.escaneo?.id) {
-        await this.client.from('escaneos').update({ estado: 'completo' }).eq('id', fila.escaneo.id);
+      if (resultado.estado === 'reintentar') {
+        porReintentar.push(numero);
+        continue;
+      }
+      if (resultado.yaExistia) {
+        yaImportados++;
+        this.eventos?.emitirCambio('actualizado', numero);
+        continue;
       }
 
       importadosNuevos++;
@@ -443,6 +458,8 @@ export class ReportesService {
       yaImportados,
       pendientesOmitidos,
       numerosImportados,
+      observados,
+      porReintentar,
     };
   }
 
