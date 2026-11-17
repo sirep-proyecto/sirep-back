@@ -65,6 +65,11 @@ export interface ResultadoLectura {
   uso: UsoLlamada;
   /** Salida cruda del proveedor para auditoría (pág. 10) */
   salidaCruda?: string;
+  /**
+   * Etiquetas impresas del talonario ("EMPRESA:", "FECHA:"…) que el modelo ubicó en la
+   * imagen. Sirven de anclas para colocar todos los campos (ver escaneos/ubicacion.ts).
+   */
+  etiquetas?: Array<{ campo: string; caja: CajaCampo }>;
 }
 
 /** Corrección puntual hecha por un humano sobre una lectura errónea del modelo. */

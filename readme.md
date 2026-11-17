@@ -10,7 +10,7 @@ Sistema para digitalizar reportes de servicio técnico industrial escritos a man
    - **Por Huella SHA-256:** Evita registrar el mismo archivo si fue reenviado.
    - **Por N° de Reporte Impreso:** Evita registrar dos veces el mismo reporte físico aunque se escanee dos veces.
 3. **Almacenamiento del Original:** El escaneo original se guarda **intacto sin comprimir** en Supabase Storage como documento legal de auditoría.
-4. **Una imagen por página:** Si llega un PDF, cada página se convierte a imagen PNG (`PDF_DPI`, 200 por defecto) y se guarda junto al original. Un PDF debe traer un solo reporte (anverso y reverso, máximo `MAX_PAGINAS_REPORTE`).
+4. **Una imagen por página:** Si llega un PDF, cada página se convierte a imagen PNG (`PDF_DPI`, 200 por defecto) y se guarda junto al original. Un PDF debe traer un solo reporte (máximo `MAX_PAGINAS_REPORTE` páginas, 10 por defecto).
 5. **Extracción Multimodal con IA:** La pieza de IA (Gemini u OpenAI) lee cada página como imagen JPEG comprimida (`IA_LADO_LARGO_PX`) y extrae los campos del formulario (`tecnico`, `empresa`, `fecha`, `equipo`, `procedimiento`, `codigo_repuesto`, etc.) con su confianza (`alta`, `media`, `baja`), marcando los ilegibles como `noLeido: true`. Si el modelo falla no se guarda nada y se avisa al chat.
 6. **Bandeja de Revisión:** Si algún campo tiene baja confianza o es dudoso, el reporte queda en estado `en_revision` para que un técnico confirme los datos con el recorte de la imagen al lado.
 

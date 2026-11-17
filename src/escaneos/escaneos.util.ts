@@ -131,7 +131,7 @@ export async function renderizarPaginasPDF(
         statusCode: 400,
         codigo: 'demasiadas_paginas',
         message:
-          `El PDF tiene ${doc.numPages} páginas y el máximo por reporte es ${maxPaginas} (anverso y reverso). ` +
+          `El PDF tiene ${doc.numPages} páginas y el máximo por reporte es ${maxPaginas}. ` +
           `Envía un archivo por reporte.`,
       });
     }
