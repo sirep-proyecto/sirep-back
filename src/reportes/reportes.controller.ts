@@ -109,6 +109,24 @@ export class ReportesController {
     return this.reportes.importarReportesRevisadosEnLote(actor);
   }
 
+  /**
+   * PDF del reporte con el formato del reporte técnico de RP-TECH (hoja de la empresa),
+   * con los valores ya corregidos y el escaneo original en el anexo.
+   */
+  @Get(':numero/pdf')
+  async descargarPdf(@Param('numero') numero: string, @Res() res?: Response) {
+    const pdf = await this.reportes.generarPdf(numero);
+
+    if (res && typeof res.setHeader === 'function') {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${pdf.filename}"`);
+      res.send(pdf.buffer);
+      return;
+    }
+
+    return pdf;
+  }
+
   /** Un reporte con sus campos y los enlaces temporales a las imágenes del escaneo. */
   @Get(':numero')
   obtener(@Param('numero') numero: string) {
