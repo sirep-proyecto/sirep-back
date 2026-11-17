@@ -174,6 +174,15 @@ function transformarRegion(t: Afin, campo: string): CajaCampo | null {
   return { x: redondear(x0), y: redondear(y0), ancho: redondear(x1 - x0), alto: redondear(y1 - y0) };
 }
 
+/** El centro de `tinta` está dentro de `zona` agrandada a cada lado la mitad de su tamaño. */
+export function cajaDentro(tinta: CajaCampo, zona: CajaCampo): boolean {
+  const cx = tinta.x + tinta.ancho / 2;
+  const cy = tinta.y + tinta.alto / 2;
+  const mx = Math.max(zona.ancho / 2, 0.02);
+  const my = Math.max(zona.alto / 2, 0.015);
+  return cx >= zona.x - mx && cx <= zona.x + zona.ancho + mx && cy >= zona.y - my && cy <= zona.y + zona.alto + my;
+}
+
 /**
  * Coloca en `caja` la zona de cada campo en este escaneo. Devuelve los campos nuevos
  * (no modifica los de entrada) y el resultado del ajuste, o null si no hubo ajuste fiable.
@@ -213,6 +222,12 @@ export function ubicarCampos(
       alto: base.alto,
       pagina,
     };
+    // Si la IA marcó la tinta de este campo y esa caja cae dentro de la zona calculada
+    // (con holgura), se respeta: abraza mejor lo escrito (p. ej. una firma baja).
+    // Si cae lejos, era un error del modelo y se usa la zona calculada.
+    if (campo.caja && cajaDentro(campo.caja, caja)) {
+      return { ...campo, caja: { ...campo.caja, pagina: campo.caja.pagina ?? pagina } };
+    }
     return { ...campo, caja };
   });
 

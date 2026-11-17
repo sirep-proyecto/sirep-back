@@ -52,6 +52,14 @@ describe('ubicación de campos por etiquetas impresas', () => {
     expect(r!.errorMedio).toBeLessThan(0.002);
   });
 
+  it('respeta la caja de tinta de la IA si cae en la zona, y la reemplaza si cae lejos', () => {
+    const cerca: CampoLeido = { ...campo('firma_cliente'), caja: { x: 0.7, y: 0.95, ancho: 0.2, alto: 0.04, pagina: 1 } };
+    const lejos: CampoLeido = { ...campo('empresa'), caja: { x: 0.1, y: 0.6, ancho: 0.2, alto: 0.02, pagina: 1 } };
+    const { campos } = ubicarCampos([cerca, lejos], etiquetasCon(corrida), 1);
+    expect(campos[0].caja).toEqual(cerca.caja);
+    expect(campos[1].caja!.y).toBeLessThan(0.3);
+  });
+
   it('no toca nada con pocas etiquetas', () => {
     const pocas = etiquetasCon(corrida).slice(0, 3);
     const entrada = [campo('empresa')];
