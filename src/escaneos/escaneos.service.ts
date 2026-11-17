@@ -16,6 +16,8 @@ import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura 
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
 import { CAMPOS_FORMULARIO } from './campos-formulario';
 import { ubicarCampos } from './ubicacion';
+import { RptechService } from '../rptech/rptech.service';
+import { FilaReporte } from '../reportes/reportes.mapper';
 import { enParalelo, paginasEnParalelo } from './paralelo';
 import {
   calcularHuellaSHA256,
@@ -29,6 +31,9 @@ import {
 } from './escaneos.util';
 
 const BUCKET = 'escaneos-originales';
+/** Igual que la selección de ReportesService: la fila con su escaneo, como la necesita el envío a RP-TECH. */
+const SELECCION_ENVIO =
+  '*, escaneo:escaneos(id, ruta_original, paginas, enviado_por, telegram_chat_id, estado, creado_en, metadatos)';
 const COLUMNAS_EXISTENTE = 'id, numero_reporte, creado_en, enviado_por, telegram_chat_id';
 export const EMPRESA_POR_DEFECTO = '00000000-0000-0000-0000-000000000000';
 
@@ -120,6 +125,8 @@ export class EscaneosService {
     private readonly supabase: SupabaseService,
     // Opcional para que las pruebas unitarias no necesiten el canal en vivo
     @Optional() private readonly eventos?: EventosGateway,
+    // Opcional: sin RP-TECH configurado (o en pruebas) simplemente no se envía
+    @Optional() private readonly rptech?: RptechService,
   ) {
     try {
       this.lectorIA = crearLectorDeReportes();
@@ -138,6 +145,20 @@ export class EscaneosService {
   }
 
   /** Borra de Storage lo ya subido cuando el procesamiento falla, para no dejar archivos huérfanos. */
+  private async enviarARptechEnSegundoPlano(escaneoId: string, numero: string | null) {
+    if (!this.rptech?.configurado() || (process.env.RPTECH_ENVIO_AUTOMATICO ?? 'true').trim() === 'false') return;
+    try {
+      const { data, error } = await this.client.from('reportes').select(SELECCION_ENVIO).eq('escaneo_id', escaneoId).maybeSingle();
+      if (error || !data) return;
+      const fila = data as unknown as FilaReporte;
+      if (fila.origen !== 'historico' || fila.bloqueado || fila.estado_reporte === 'aprobado_rptech') return;
+      await this.rptech.enviar(fila);
+      this.eventos?.emitirCambio('actualizado', numero ?? undefined);
+    } catch (e) {
+      this.logger.warn(`No se pudo enviar ${numero ?? escaneoId} a RP-TECH: ${(e as Error).message}`);
+    }
+  }
+
   private async limpiarStorage(rutas: string[]) {
     if (rutas.length === 0) return;
     try {
@@ -398,6 +419,11 @@ export class EscaneosService {
       });
 
       this.eventos?.emitirCambio('creado', numeroReporte);
+
+      // 12. Un reporte que la IA leyó sin dudas queda "completo" sin que nadie lo revise, así que
+      // nunca pasaba por el envío automático (que solo corre al resolver el último dudoso) y se
+      // quedaba "Por enviar". Se envía aquí, sin hacer esperar a quien lo subió.
+      if (estado === 'completo') void this.enviarARptechEnSegundoPlano(escaneoId, numeroReporte);
 
       return {
         escaneoId,
