@@ -87,7 +87,7 @@ El frontend (`sirep-front`, puerto 3001) consume estos endpoints. Los datos son 
 |---|---|---|
 | `GET` | `/reportes` | Lista los reportes digitalizados con sus campos y estado. |
 | `GET` | `/reportes/:numero` | Un reporte con enlaces temporales (1 h) a la imagen de cada página. |
-| `PATCH` | `/reportes/:numero/campos/:campoId` | `{ "tipo": "confirmar" \| "corregir" \| "ilegible" \| "reabrir", "actor": "...", "valor": "..." }` |
+| `PATCH` | `/reportes/:numero/campos/:campoId` | `{ "tipo": "confirmar" \| "corregir" \| "ilegible" \| "omitir" \| "reabrir", "actor": "...", "valor": "..." }` |
 
 - Lo que leyó el modelo **nunca se sobrescribe**: la corrección se guarda aparte (`campos_extraidos.<campo>.revision`) con quién y cuándo.
 - Las columnas de `reportes` (cliente, fecha, equipo…) se actualizan con el valor vigente al corregir.

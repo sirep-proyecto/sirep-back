@@ -145,6 +145,22 @@ describe('construirEnvio', () => {
     });
   });
 
+  it('un campo omitido va vacío; una casilla omitida es "no" (no "sin_dato") y una firma omitida es false', () => {
+    const f = fila({ tinta: 'xx', garantia: true, facturado: true, firma_operador: true, firma_cliente: true });
+    const omitido = {
+      estado: 'omitido' as const, valor_corregido: null, revisado_por: 'M', revisado_en: null, corregido_por: null, corregido_en: null,
+    };
+    for (const id of ['tinta', 'garantia', 'firma_operador']) f.campos_extraidos![id].revision = { ...omitido };
+    f.campos_extraidos!.facturado.revision = { ...omitido, estado: 'ilegible' };
+    const e = construirEnvio(f, ESCANEO);
+    expect(e.tinta).toBeNull();
+    expect(e.garantia).toBe('no');
+    expect(e.facturado).toBe('sin_dato');
+    expect(e.firma_operador_presente).toBe(false);
+    expect(e.firma_cliente_presente).toBe(true);
+    expect(e.revision_campos.tinta).toEqual({ confianza: 'alta', estado: 'omitido' });
+  });
+
   it('usa la corrección del revisor y deja vacío lo ilegible', () => {
     const f = fila({ empresa: 'Textiles Andinoz', tinta: 'xx' });
     f.campos_extraidos!.empresa.revision = {

@@ -464,7 +464,7 @@ export class ReportesService {
   }
 
   /**
-   * SIREP-S3-T18: Genera métricas agregadas por campo (confirmados, corregidos, ilegibles y
+   * SIREP-S3-T18: Genera métricas agregadas por campo (confirmados, corregidos, ilegibles, omitidos y
    * confianza declarada) sin incluir ningún dato de clientes.
    */
   async obtenerMetricasCampos(): Promise<{
@@ -477,6 +477,7 @@ export class ReportesService {
       corregidos: number;
       ilegibles: number;
       confianza_declarada: string;
+      omitidos: number;
     }>;
     csv: string;
   }> {
@@ -494,11 +495,11 @@ export class ReportesService {
     const filas = Array.isArray(data) ? data : [];
     const contadores = new Map<
       string,
-      { total: number; confirmados: number; corregidos: number; ilegibles: number; alta: number; media: number; baja: number }
+      { total: number; confirmados: number; corregidos: number; ilegibles: number; omitidos: number; alta: number; media: number; baja: number }
     >();
 
     for (const id of IDS_CAMPOS_FORMULARIO) {
-      contadores.set(id, { total: 0, confirmados: 0, corregidos: 0, ilegibles: 0, alta: 0, media: 0, baja: 0 });
+      contadores.set(id, { total: 0, confirmados: 0, corregidos: 0, ilegibles: 0, omitidos: 0, alta: 0, media: 0, baja: 0 });
     }
 
     for (const fila of filas) {
@@ -511,6 +512,8 @@ export class ReportesService {
           entry.confirmados++;
         } else if (c.estado_revision === 'corregido') {
           entry.corregidos++;
+        } else if (c.estado_revision === 'omitido') {
+          entry.omitidos++;
         } else if (c.estado_revision === 'ilegible' || c.no_leido) {
           entry.ilegibles++;
         }
@@ -529,13 +532,14 @@ export class ReportesService {
         corregidos: c.corregidos,
         ilegibles: c.ilegibles,
         confianza_declarada: `alta:${c.alta}|media:${c.media}|baja:${c.baja}`,
+        omitidos: c.omitidos,
       };
     });
 
     const lineas = [
-      'campo,total,confirmados,corregidos,ilegibles,confianza_declarada',
+      'campo,total,confirmados,corregidos,ilegibles,confianza_declarada,omitidos',
       ...metricas.map(
-        (m) => `${m.campo},${m.total},${m.confirmados},${m.corregidos},${m.ilegibles},${m.confianza_declarada}`,
+        (m) => `${m.campo},${m.total},${m.confirmados},${m.corregidos},${m.ilegibles},${m.confianza_declarada},${m.omitidos}`,
       ),
     ];
 
@@ -693,6 +697,9 @@ export class ReportesService {
         return { ...vacia, estado: 'confirmado', revisado_por: actor, revisado_en: ahora };
       case 'ilegible':
         return { ...vacia, estado: 'ilegible', revisado_por: actor, revisado_en: ahora };
+      // "Omitir" = el campo estaba vacío en el papel. Solo lo hace una persona; nunca se aplica solo.
+      case 'omitir':
+        return { ...vacia, estado: 'omitido', revisado_por: actor, revisado_en: ahora };
       case 'corregir':
         return {
           estado: 'corregido',

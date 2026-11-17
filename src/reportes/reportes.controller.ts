@@ -71,7 +71,7 @@ export class ReportesController {
 
   /**
    * SIREP-S3-T18: Métricas agregadas por campo (sin ningún dato de clientes).
-   * Con `?formato=csv` devuelve directamente `campo,total,confirmados,corregidos,ilegibles,confianza_declarada`.
+   * Con `?formato=csv` devuelve directamente `campo,total,confirmados,corregidos,ilegibles,confianza_declarada,omitidos`.
    */
   @Get('metricas/campos')
   async obtenerMetricasCampos(
@@ -143,7 +143,7 @@ export class ReportesController {
   }
 
   /**
-   * Confirmar, corregir, marcar ilegible o reabrir un campo.
+   * Confirmar, corregir, marcar ilegible, omitir (vacío en el papel) o reabrir un campo.
    * SIREP-S3-T04: Cada corrección queda registrada con el usuario autenticado de la sesión.
    */
   @Patch(':numero/campos/:campoId')

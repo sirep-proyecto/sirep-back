@@ -171,6 +171,31 @@ describe('ReportesService', () => {
       expect(rep.datos.procedimiento).toBeNull();
     });
 
+    it('omitir marca el campo como vacío en el papel: valor nulo, firmado por la persona y sin pendientes', async () => {
+      filas = [fila({}, ['procedimiento'])];
+      filas[0].campos_extraidos!.procedimiento.valor = 'texto dudoso';
+      await service.revisarCampo('000214', 'procedimiento', { tipo: 'omitir', actor: 'Luis' });
+      const rep = actualizaciones.find((a) => a.tabla === 'reportes')!;
+      expect(rep.datos.campos_extraidos.procedimiento.revision).toMatchObject({
+        estado: 'omitido', valor_corregido: null, revisado_por: 'Luis', corregido_por: null, corregido_en: null,
+      });
+      expect(rep.datos.campos_extraidos.procedimiento.revision.revisado_en).toEqual(expect.any(String));
+      expect(rep.datos.procedimiento).toBeNull();
+      expect(rep.datos.campos_dudosos).toEqual([]);
+      expect(rep.datos.estado_reporte).toBe('aprobado');
+    });
+
+    it('reabrir deshace un campo omitido y vuelve a dejarlo pendiente', async () => {
+      filas = [fila({}, ['procedimiento'])];
+      filas[0].campos_extraidos!.procedimiento.revision = {
+        estado: 'omitido', valor_corregido: null, revisado_por: 'Luis', revisado_en: '2026-11-14T10:00:00Z', corregido_por: null, corregido_en: null,
+      };
+      await service.revisarCampo('000214', 'procedimiento', { tipo: 'reabrir', actor: 'Luis' });
+      const rep = actualizaciones.find((a) => a.tabla === 'reportes')!;
+      expect(rep.datos.campos_extraidos.procedimiento.revision).toMatchObject({ estado: 'pendiente', revisado_por: null });
+      expect(rep.datos.campos_dudosos).toEqual(['procedimiento']);
+    });
+
     it('con campos aún pendientes el reporte queda en revisión', async () => {
       filas = [fila({}, ['codigo_repuesto', 'direccion'])];
       await service.revisarCampo('000214', 'direccion', { tipo: 'corregir', actor: 'Ana', valor: 'Av. Lima 123' });
@@ -413,15 +438,27 @@ describe('ReportesService', () => {
         corregido_por: null,
         corregido_en: null,
       };
+      f.campos_extraidos!.direccion.revision = {
+        estado: 'omitido',
+        valor_corregido: null,
+        revisado_por: 'David',
+        revisado_en: '2026-11-14T10:00:00Z',
+        corregido_por: null,
+        corregido_en: null,
+      };
       filas = [f];
 
       const metricas = await service.obtenerMetricasCampos();
       expect(metricas.totalReportes).toBe(1);
       expect(metricas.metricas).toHaveLength(IDS_CAMPOS_FORMULARIO.length);
-      expect(metricas.csv.startsWith('campo,total,confirmados,corregidos,ilegibles,confianza_declarada\n')).toBe(true);
+      // Las columnas existentes no cambian de lugar: `omitidos` va al final.
+      expect(metricas.csv.startsWith('campo,total,confirmados,corregidos,ilegibles,confianza_declarada,omitidos\n')).toBe(true);
       expect(metricas.csv).not.toContain('CONFIDENCIAL CLIENTE SAC');
       expect(metricas.csv).toContain('empresa,1,0,1,0,');
       expect(metricas.csv).toContain('codigo_repuesto,1,0,0,1,');
+      expect(metricas.csv).toMatch(/direccion,1,0,0,0,[^,]*,1\n/);
+      expect(metricas.csv).toMatch(/empresa,1,0,1,0,[^,]*,0\n/);
+      expect(metricas.metricas.find((m) => m.campo === 'direccion')).toMatchObject({ omitidos: 1, ilegibles: 0 });
     });
   });
 });

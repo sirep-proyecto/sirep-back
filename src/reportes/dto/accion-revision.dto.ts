@@ -1,6 +1,6 @@
 import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
-export const TIPOS_ACCION = ['confirmar', 'corregir', 'ilegible', 'reabrir'] as const;
+export const TIPOS_ACCION = ['confirmar', 'corregir', 'ilegible', 'omitir', 'reabrir'] as const;
 export type TipoAccion = (typeof TIPOS_ACCION)[number];
 
 export class AccionRevisionDto {
