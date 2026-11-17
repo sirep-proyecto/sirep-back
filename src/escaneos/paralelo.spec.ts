@@ -39,7 +39,7 @@ describe('enParalelo', () => {
     process.env.IA_PAGINAS_EN_PARALELO = '5';
     expect(paginasEnParalelo()).toBe(5);
     process.env.IA_PAGINAS_EN_PARALELO = 'x';
-    expect(paginasEnParalelo()).toBe(3);
+    expect(paginasEnParalelo()).toBe(2);
     delete process.env.IA_PAGINAS_EN_PARALELO;
   });
 });

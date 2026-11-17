@@ -6,10 +6,10 @@
  * empiezan tareas nuevas (las que ya estaban en curso terminan solas).
  */
 
-/** Páginas que se leen a la vez (env `IA_PAGINAS_EN_PARALELO`, 3 por defecto, entre 1 y 10). */
+/** Páginas que se leen a la vez (env `IA_PAGINAS_EN_PARALELO`, 2 por defecto, entre 1 y 10). */
 export function paginasEnParalelo(): number {
   const n = Number(process.env.IA_PAGINAS_EN_PARALELO);
-  return Number.isFinite(n) && n >= 1 ? Math.min(10, Math.floor(n)) : 3;
+  return Number.isFinite(n) && n >= 1 ? Math.min(10, Math.floor(n)) : 2;
 }
 
 export async function enParalelo<T, R>(
