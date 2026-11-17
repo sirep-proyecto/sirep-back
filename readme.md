@@ -131,7 +131,7 @@ Ejemplo 409: `{"statusCode":409,"message":"El reporte N° 000845 ya se encuentra
 El reporte aprobado vive en RP-TECH. SIREP lo envía a la función `importar-historico` de RP-TECH según el contrato [docs/contrato-historico.md](docs/contrato-historico.md) (versión 1).
 
 - **Configuración:** `RPTECH_URL` y `RPTECH_CLAVE` en `.env` (la clave la entrega RP-TECH por privado). Sin las dos no se envía nada y nada se marca como importado.
-- **Cuándo se envía:** al terminar de revisar un reporte histórico en la bandeja (si `RPTECH_ENVIO_AUTOMATICO` no es `false`), con `PATCH /reportes/:numero/importar`, o en lote con `POST /reportes/importar-lote` o `npm run db:migrar-revisados` (`-- --dry-run` para simular).
+- **Cuándo se envía:** solo a mano, desde la bandeja: botón "Enviar" de cada reporte (`PATCH /reportes/:numero/importar`) o "Enviar completados a RP-TECH" (`POST /reportes/importar-lote`). También con `npm run db:migrar-revisados` (`-- --dry-run` para simular). No hay envío automático.
 - **Qué se marca:** `aprobado_rptech`, `bloqueado` e `importado_en` solo cuando RP-TECH responde que lo guardó; además se guarda `rptech_id`. Si RP-TECH lo rechaza (talonario repetido o datos que no cumplen el contrato), queda `observado` con el motivo en `rptech_error`. Sin conexión, queda como estaba para reintentar.
 - **Qué no se envía:** los ids de las tablas propias de SIREP (`cliente_id`, `equipo_id`, `tecnico_perfil_id`) ni `empresa_id`. El vínculo con los clientes reales lo hace RP-TECH.
 - **Código:** `src/rptech/rptech.envio.ts` (conversión al contrato) y `src/rptech/rptech.cliente.ts` (envío y respuesta), con sus pruebas.
