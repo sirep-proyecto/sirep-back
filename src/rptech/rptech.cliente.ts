@@ -98,18 +98,22 @@ export async function enviarReporte(
   const ahora = new Date().toISOString();
   if (typeof escaneo === 'string') {
     const r: ResultadoEnvio = { estado: 'observado', codigo: 'escaneo', detalle: escaneo };
-    await client.from('reportes').update({
+    await actualizar(client, fila.id, {
       estado_reporte: 'observado',
       rptech_error: { codigo: r.codigo, detalle: r.detalle },
       rptech_enviado_en: ahora,
-    }).eq('id', fila.id);
+    });
     return r;
   }
 
   const resultado = await postear(cfg, construirEnvio(fila, escaneo), fetchImpl);
 
   if (resultado.estado === 'importado') {
-    await client.from('reportes').update({
+    const respaldo =
+      fila.datos_originales && Object.keys(fila.datos_originales).length > 0
+        ? {}
+        : { datos_originales: fila.campos_extraidos ?? {} };
+    const marcado = await actualizar(client, fila.id, {
       estado_reporte: 'aprobado_rptech',
       bloqueado: true,
       importado_en: ahora,
@@ -117,24 +121,43 @@ export async function enviarReporte(
       rptech_error: null,
       rptech_enviado_en: ahora,
       // Respaldo local de lo leído, como hacía el cierre anterior.
-      ...(fila.datos_originales && Object.keys(fila.datos_originales).length > 0
-        ? {}
-        : { datos_originales: fila.campos_extraidos ?? {} }),
-    }).eq('id', fila.id);
+      ...respaldo,
+    });
+    if (!marcado) {
+      // RP-TECH YA lo guardó: aunque falle marcarlo aquí, se informa como importado y se
+      // reintenta solo lo esencial para que la bandeja deje de mostrarlo "Por enviar".
+      await actualizar(client, fila.id, { estado_reporte: 'aprobado_rptech', bloqueado: true, importado_en: ahora });
+    }
     if (fila.escaneo?.id) await client.from('escaneos').update({ estado: 'completo' }).eq('id', fila.escaneo.id);
   } else if (resultado.estado === 'observado') {
-    await client.from('reportes').update({
+    await actualizar(client, fila.id, {
       estado_reporte: 'observado',
       rptech_error: { codigo: resultado.codigo, detalle: resultado.detalle },
       rptech_enviado_en: ahora,
-    }).eq('id', fila.id);
+    });
   } else if (resultado.estado === 'reintentar') {
-    await client.from('reportes').update({
+    await actualizar(client, fila.id, {
       rptech_error: { codigo: 'reintentar', detalle: resultado.detalle },
       rptech_enviado_en: ahora,
-    }).eq('id', fila.id);
+    });
   }
   return resultado;
+}
+
+/**
+ * Actualiza el reporte y NO ignora el error: antes, si faltaba una columna (migración
+ * 20261116100000_envio_rptech.sql sin aplicar) el reporte quedaba en "Por enviar" aunque
+ * RP-TECH ya lo tuviera, sin ningún aviso. Devuelve si se guardó.
+ */
+async function actualizar(client: SupabaseClient, id: string, cambios: Record<string, unknown>): Promise<boolean> {
+  const { error } = await client.from('reportes').update(cambios).eq('id', id);
+  if (!error) return true;
+  const faltaColumna = /column|columna|schema cache|PGRST204|42703/i.test(`${error.code ?? ''} ${error.message ?? ''}`);
+  console.error(
+    `[rptech] No se pudo actualizar el reporte ${id}: ${error.message}` +
+      (faltaColumna ? ' — falta aplicar la migración supabase/migrations/20261116100000_envio_rptech.sql' : ''),
+  );
+  return false;
 }
 
 /** ¿Este reporte está listo para enviar? Histórico, sin pendientes y aún no importado. */
