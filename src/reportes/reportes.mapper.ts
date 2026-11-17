@@ -128,6 +128,8 @@ export interface FilaEscaneo {
   ruta_original: string;
   paginas: number;
   enviado_por: string | null;
+  /** Solo los envíos de Telegram traen chat; null = subido desde la página web. */
+  telegram_chat_id?: number | string | null;
   estado: EstadoEscaneo;
   creado_en: string;
   metadatos?: { rutas_paginas?: string[] } | null;
@@ -221,7 +223,7 @@ export function aReporteContrato(
       paginas: escaneo?.paginas ?? 1,
       paginas_urls: urlsPaginas,
       enviado_por: escaneo?.enviado_por ?? 'telegram',
-      canal: 'telegram' as const,
+      canal: (escaneo && escaneo.telegram_chat_id === null ? 'web' : 'telegram') as 'telegram' | 'web',
       estado,
       recibido_en: escaneo?.creado_en ?? fila.creado_en,
       procesado_en: escaneo?.creado_en ?? fila.creado_en,

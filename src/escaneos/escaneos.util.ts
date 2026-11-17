@@ -118,15 +118,22 @@ export async function renderizarPaginasPDF(
       verbosity: 0,
     }).promise;
   } catch {
-    throw new BadRequestException('No se pudo abrir el PDF. Verifica que no esté dañado ni protegido con contraseña.');
+    throw new BadRequestException({
+      statusCode: 400,
+      codigo: 'archivo_danado',
+      message: 'No se pudo abrir el PDF. Verifica que no esté dañado ni protegido con contraseña.',
+    });
   }
 
   try {
     if (doc.numPages > maxPaginas) {
-      throw new BadRequestException(
-        `El PDF tiene ${doc.numPages} páginas y el máximo por reporte es ${maxPaginas} (anverso y reverso). ` +
-        `Envía un archivo por reporte.`,
-      );
+      throw new BadRequestException({
+        statusCode: 400,
+        codigo: 'demasiadas_paginas',
+        message:
+          `El PDF tiene ${doc.numPages} páginas y el máximo por reporte es ${maxPaginas} (anverso y reverso). ` +
+          `Envía un archivo por reporte.`,
+      });
     }
 
     const imagenes: Buffer[] = [];
@@ -157,7 +164,11 @@ export async function validarImagen(buffer: Buffer): Promise<{ extension: string
     const extension = meta.format === 'jpeg' ? 'jpg' : meta.format;
     return { extension, mimetype: `image/${meta.format}` };
   } catch {
-    throw new BadRequestException('El archivo no es un PDF ni una imagen válida (JPG, PNG o WebP).');
+    throw new BadRequestException({
+      statusCode: 400,
+      codigo: 'formato_no_admitido',
+      message: 'El archivo no es un PDF ni una imagen válida. Solo se aceptan PDF o fotos JPG, PNG o WebP (no Word ni otros formatos).',
+    });
   }
 }
 
@@ -249,4 +260,9 @@ export function fusionarLecturas(lecturas: ResultadoLectura[]): ResultadoLectura
     uso,
     salidaCruda: JSON.stringify(lecturas.map((l) => l.salidaCruda ?? null)),
   };
+}
+
+/** Tamaño máximo de un archivo subido, en MB (env `MAX_MB_ESCANEO`, 10 por defecto). */
+export function limiteMbEscaneo(): number {
+  return enteroDeEnv('MAX_MB_ESCANEO', 10);
 }

@@ -51,7 +51,7 @@ const VIGENCIA_ENLACES_SEG = 60 * 60;
 
 // Sin `metadatos` completo: trae la salida cruda del modelo y no hace falta para listar.
 const SELECCION =
-  '*, escaneo:escaneos(id, ruta_original, paginas, enviado_por, estado, creado_en, metadatos)';
+  '*, escaneo:escaneos(id, ruta_original, paginas, enviado_por, telegram_chat_id, estado, creado_en, metadatos)';
 
 @Injectable()
 export class ReportesService {
