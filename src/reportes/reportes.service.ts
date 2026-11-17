@@ -8,6 +8,7 @@ import {
   Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { readFile } from 'node:fs/promises';
 import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
@@ -22,6 +23,7 @@ import {
 } from '../ia-extractor/normalizacion';
 import { AccionRevisionDto } from './dto/accion-revision.dto';
 import { columnasDesdeValores } from './reportes.columnas';
+import { generarPdfReporte } from './reportes.pdf';
 import {
   COLUMNAS_EXPORTACION_RPTECH,
   FilaReporteExportable,
@@ -88,6 +90,61 @@ export class ReportesService {
     const urls = await this.firmarPaginas(fila);
     const vinculos = await this.calcularVinculosSugeridos(fila);
     return aReporteContrato(fila, urls, vinculos);
+  }
+
+  /**
+   * PDF del reporte con el formato del reporte técnico de RP-TECH y los valores ya revisados
+   * (corrección humana > lectura de la IA). Incluye un anexo con el escaneo original; si no se
+   * puede descargar el escaneo, el PDF sale igual solo con el formulario.
+   */
+  async generarPdf(numero: string): Promise<{ buffer: Buffer; filename: string }> {
+    const fila = await this.buscarFila(numero);
+    const campos = construirCampos(fila.campos_extraidos);
+    const numeroReporte = numeroVisible(fila);
+    const escaneo = await this.descargarPaginas(fila);
+    const logo = await this.leerLogo();
+    try {
+      const pdf = await generarPdfReporte(
+        { numero: numeroReporte, campos, revisadoPor: fila.corregido_por ?? null, revisadoEn: fila.fecha_correccion ?? null },
+        escaneo,
+        logo,
+      );
+      return { buffer: Buffer.from(pdf), filename: `Reporte_${numeroReporte.replace(/[^\w.-]/g, '_')}.pdf` };
+    } catch (e) {
+      this.logger.error(`No se pudo generar el PDF de ${numeroReporte}: ${(e as Error).message}`);
+      throw new InternalServerErrorException('No se pudo generar el PDF del reporte.');
+    }
+  }
+
+  /** Descarga del storage las páginas del escaneo, en orden. Una que falle se omite. */
+  private async descargarPaginas(fila: FilaReporte): Promise<Uint8Array[]> {
+    const rutas = fila.escaneo?.metadatos?.rutas_paginas?.length
+      ? fila.escaneo.metadatos.rutas_paginas
+      : fila.escaneo?.ruta_original
+        ? [fila.escaneo.ruta_original]
+        : [];
+    const paginas: Uint8Array[] = [];
+    for (const ruta of rutas) {
+      const { data, error } = await this.client.storage.from(BUCKET).download(ruta);
+      if (error || !data) {
+        this.logger.warn(`No se pudo descargar ${ruta} para el PDF: ${error?.message ?? 'sin datos'}`);
+        continue;
+      }
+      paginas.push(new Uint8Array(await data.arrayBuffer()));
+    }
+    return paginas;
+  }
+
+  /** Logo opcional del encabezado: ruta en `PDF_LOGO_PATH`; sin ella se escribe el nombre de la empresa. */
+  private async leerLogo(): Promise<Uint8Array | null> {
+    const ruta = process.env.PDF_LOGO_PATH?.trim();
+    if (!ruta) return null;
+    try {
+      return new Uint8Array(await readFile(ruta));
+    } catch (e) {
+      this.logger.warn(`No se pudo leer el logo del PDF (${ruta}): ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /**
@@ -464,7 +521,7 @@ export class ReportesService {
   }
 
   /**
-   * SIREP-S3-T18: Genera métricas agregadas por campo (confirmados, corregidos, ilegibles y
+   * SIREP-S3-T18: Genera métricas agregadas por campo (confirmados, corregidos, ilegibles, omitidos y
    * confianza declarada) sin incluir ningún dato de clientes.
    */
   async obtenerMetricasCampos(): Promise<{
@@ -477,6 +534,7 @@ export class ReportesService {
       corregidos: number;
       ilegibles: number;
       confianza_declarada: string;
+      omitidos: number;
     }>;
     csv: string;
   }> {
@@ -494,11 +552,11 @@ export class ReportesService {
     const filas = Array.isArray(data) ? data : [];
     const contadores = new Map<
       string,
-      { total: number; confirmados: number; corregidos: number; ilegibles: number; alta: number; media: number; baja: number }
+      { total: number; confirmados: number; corregidos: number; ilegibles: number; omitidos: number; alta: number; media: number; baja: number }
     >();
 
     for (const id of IDS_CAMPOS_FORMULARIO) {
-      contadores.set(id, { total: 0, confirmados: 0, corregidos: 0, ilegibles: 0, alta: 0, media: 0, baja: 0 });
+      contadores.set(id, { total: 0, confirmados: 0, corregidos: 0, ilegibles: 0, omitidos: 0, alta: 0, media: 0, baja: 0 });
     }
 
     for (const fila of filas) {
@@ -511,6 +569,8 @@ export class ReportesService {
           entry.confirmados++;
         } else if (c.estado_revision === 'corregido') {
           entry.corregidos++;
+        } else if (c.estado_revision === 'omitido') {
+          entry.omitidos++;
         } else if (c.estado_revision === 'ilegible' || c.no_leido) {
           entry.ilegibles++;
         }
@@ -529,13 +589,14 @@ export class ReportesService {
         corregidos: c.corregidos,
         ilegibles: c.ilegibles,
         confianza_declarada: `alta:${c.alta}|media:${c.media}|baja:${c.baja}`,
+        omitidos: c.omitidos,
       };
     });
 
     const lineas = [
-      'campo,total,confirmados,corregidos,ilegibles,confianza_declarada',
+      'campo,total,confirmados,corregidos,ilegibles,confianza_declarada,omitidos',
       ...metricas.map(
-        (m) => `${m.campo},${m.total},${m.confirmados},${m.corregidos},${m.ilegibles},${m.confianza_declarada}`,
+        (m) => `${m.campo},${m.total},${m.confirmados},${m.corregidos},${m.ilegibles},${m.confianza_declarada},${m.omitidos}`,
       ),
     ];
 
@@ -693,6 +754,9 @@ export class ReportesService {
         return { ...vacia, estado: 'confirmado', revisado_por: actor, revisado_en: ahora };
       case 'ilegible':
         return { ...vacia, estado: 'ilegible', revisado_por: actor, revisado_en: ahora };
+      // "Omitir" = el campo estaba vacío en el papel. Solo lo hace una persona; nunca se aplica solo.
+      case 'omitir':
+        return { ...vacia, estado: 'omitido', revisado_por: actor, revisado_en: ahora };
       case 'corregir':
         return {
           estado: 'corregido',

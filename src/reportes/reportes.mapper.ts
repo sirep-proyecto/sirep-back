@@ -3,7 +3,7 @@ import { aTexto } from './reportes.columnas';
 
 export type Confianza = 'alta' | 'media' | 'baja';
 export type EstadoEscaneo = 'recibido' | 'procesado' | 'en_revision' | 'completo';
-export type EstadoRevisionCampo = 'auto' | 'pendiente' | 'confirmado' | 'corregido' | 'ilegible';
+export type EstadoRevisionCampo = 'auto' | 'pendiente' | 'confirmado' | 'corregido' | 'ilegible' | 'omitido';
 
 /** Revisión humana de un campo. Se guarda aparte de lo que leyó el modelo para que siempre se sepa quién cambió qué. */
 export interface RevisionCampo {
@@ -109,13 +109,16 @@ export function construirCampos(guardados: Record<string, CampoGuardado> | null 
 export function derivarEstado(campos: readonly CampoContrato[]): EstadoEscaneo {
   const hayPendientes = campos.some((c) => c.estado_revision === 'pendiente');
   if (!hayPendientes) return 'completo';
-  const intervino = campos.some((c) => ['confirmado', 'corregido', 'ilegible'].includes(c.estado_revision));
+  const intervino = campos.some((c) => ['confirmado', 'corregido', 'ilegible', 'omitido'].includes(c.estado_revision));
   return intervino ? 'en_revision' : 'procesado';
 }
 
-/** Valor que hoy representa al campo: la corrección humana manda y un "ilegible" no deja valor. */
+/**
+ * Valor que hoy representa al campo: la corrección humana manda; un "ilegible" no deja valor
+ * y un "omitido" (el campo estaba vacío en el papel) tampoco: queda vacío.
+ */
 export function valorVigente(campo: CampoContrato): string | null {
-  if (campo.estado_revision === 'ilegible') return null;
+  if (campo.estado_revision === 'ilegible' || campo.estado_revision === 'omitido') return null;
   if (campo.valor_corregido !== null && campo.valor_corregido !== '') return campo.valor_corregido;
   return campo.valor_modelo;
 }

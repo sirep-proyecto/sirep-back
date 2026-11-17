@@ -12,7 +12,7 @@ Este contrato lo fija RP-TECH, que es donde viven los datos, y SIREP adapta su s
 ## 1. Qué se envía y cuándo
 
 - Solo se envían los reportes de SIREP con `origen = 'historico'`, `estado_reporte = 'aprobado'` y ningún campo en `estado_revision = 'pendiente'`. Es decir, los revisados en la bandeja.
-- **El valor que se envía de cada campo es el vigente** (`valorVigente` de `reportes.mapper.ts`): primero la corrección humana, luego lo leído por la IA, y vacío si el campo quedó `ilegible`.
+- **El valor que se envía de cada campo es el vigente** (`valorVigente` de `reportes.mapper.ts`): primero la corrección humana, luego lo leído por la IA, y vacío si el campo quedó `ilegible` u `omitido` (vacío en el papel, decidido siempre por una persona).
 - Se envía **un reporte por petición**, junto con su escaneo.
 - Cuando RP-TECH responde `creado` o `ya_existia`, SIREP marca el reporte como `aprobado_rptech` y guarda `importado_en`. Si responde con error, el reporte queda en `aprobado` para corregirlo y reenviarlo.
 
@@ -114,11 +114,11 @@ SIREP arma la lista así:
 
 | SIREP | Contrato | Valores |
 |---|---|---|
-| `garantia` (casilla) | `garantia` | Marcada: `si`; no marcada: `no`; ilegible o sin revisar: `sin_dato` |
+| `garantia` (casilla) | `garantia` | Marcada: `si`; no marcada: `no`; omitida (`omitido`): `no`; ilegible o sin revisar: `sin_dato` |
 | `facturado` (casilla) | `facturado` | Igual que `garantia` |
 | `firma_operador` | `firma_operador_presente` | `true` o `false` |
 | `firma_cliente` | `firma_cliente_presente` | `true` o `false` |
-| `campos_extraidos` (por campo: `confianza` y `estado_revision`) | `revision_campos` | Objeto con una entrada por campo, con el nombre **del contrato**: `{ "confianza": "alta" \| "media" \| "baja", "estado": "auto" \| "confirmado" \| "corregido" \| "ilegible" }` |
+| `campos_extraidos` (por campo: `confianza` y `estado_revision`) | `revision_campos` | Objeto con una entrada por campo, con el nombre **del contrato**: `{ "confianza": "alta" \| "media" \| "baja", "estado": "auto" \| "confirmado" \| "corregido" \| "ilegible" \| "omitido" }` |
 | `corregido_por` | `revisado_por` | Nombre de quien lo revisó en la bandeja |
 | `fecha_correccion` | `revisado_en` | Fecha y hora ISO 8601 con zona |
 | `campos_extraidos` y lo que no encaje | `datos_originales` | Objeto JSON con todo lo leído que no tiene columna |

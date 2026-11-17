@@ -116,16 +116,21 @@ export function horaHHMM(valor: string | null): string | null {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(h) ? h : null;
 }
 
-/** Casilla de la labor: marcada `si`, sin marcar `no`, ilegible o sin dato `sin_dato`. */
+/**
+ * Casilla de la labor: marcada `si`, sin marcar `no`, ilegible o sin dato `sin_dato`.
+ * Un campo `omitido` (vacío en el papel) es una casilla sin marcar: `no`, a diferencia de `ilegible`.
+ */
 export function siNo(campo: CampoContrato | undefined): 'si' | 'no' | 'sin_dato' {
+  if (campo?.estado_revision === 'omitido') return 'no';
   if (!campo || campo.estado_revision === 'ilegible') return 'sin_dato';
   const v = valorVigente(campo);
   if (v === null) return 'sin_dato';
   return casillaMarcada(v) ? 'si' : 'no';
 }
 
-/** Firma presente: true o false; null si no se pudo saber. */
+/** Firma presente: true o false; null si no se pudo saber. Una firma `omitida` (vacía en el papel) es `false`. */
 export function presente(campo: CampoContrato | undefined): boolean | null {
+  if (campo?.estado_revision === 'omitido') return false;
   if (!campo || campo.estado_revision === 'ilegible') return null;
   const v = valorVigente(campo);
   return v === null ? null : casillaMarcada(v);

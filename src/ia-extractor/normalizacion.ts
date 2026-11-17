@@ -731,7 +731,7 @@ export function construirContextoDesdeReportes(
       if (typeof valorColumna === 'string' && valorColumna.trim()) return valorColumna.trim();
       const dato = extraidos[clave];
       if (!dato || typeof dato !== 'object') return null;
-      if (dato.revision?.estado === 'ilegible') return null;
+      if (dato.revision?.estado === 'ilegible' || dato.revision?.estado === 'omitido') return null;
       if (typeof dato.revision?.valor_corregido === 'string' && dato.revision.valor_corregido.trim()) {
         return dato.revision.valor_corregido.trim();
       }

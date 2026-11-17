@@ -99,6 +99,28 @@ describe('reportes.mapper', () => {
     expect(valorVigente({ ...base, estado_revision: 'ilegible' })).toBeNull();
   });
 
+  it('valorVigente: un campo omitido (vacío en el papel) no deja valor aunque el modelo haya leído algo', () => {
+    const base = construirCampos(guardadosLimpios())[0];
+    expect(base.valor_modelo).not.toBeNull();
+    expect(valorVigente({ ...base, estado_revision: 'omitido', valor_corregido: null })).toBeNull();
+  });
+
+  it('un reporte con campos omitidos no cuenta pendientes y se considera completo', () => {
+    const g = guardadosLimpios();
+    g.motivo = { ...campoOk('motivo', null), noLeido: true, dudoso: true };
+    g.conclusion = { ...campoOk('conclusion', null), confianza: 'baja' };
+    expect(derivarEstado(construirCampos(g))).toBe('procesado');
+    const rev = { estado: 'omitido' as const, valor_corregido: null, revisado_por: 'Ana', revisado_en: '2026-11-14T10:00:00Z', corregido_por: null, corregido_en: null };
+    g.motivo.revision = rev;
+    g.conclusion.revision = rev;
+    const campos = construirCampos(g);
+    expect(campos.filter((c) => c.estado_revision === 'pendiente')).toHaveLength(0);
+    expect(derivarEstado(campos)).toBe('completo');
+    // Con otro campo aún pendiente, que alguien haya omitido uno cuenta como "intervino".
+    g.tecnico = { ...campoOk('tecnico'), dudoso: true };
+    expect(derivarEstado(construirCampos(g))).toBe('en_revision');
+  });
+
   it('numeroVisible usa el N° del talonario o un identificador SN- si no se pudo leer', () => {
     expect(numeroVisible({ id: 'abcdef12-0000', numero_talonario: '000214' })).toBe('000214');
     expect(numeroVisible({ id: 'abcdef12-0000', numero_talonario: null })).toBe('SN-abcdef12');
