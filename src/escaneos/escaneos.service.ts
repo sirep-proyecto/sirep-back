@@ -15,6 +15,7 @@ import { construirContextoDesdeReportes, registrarEdicionEnDataset } from '../ia
 import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
 import { CAMPOS_FORMULARIO } from './campos-formulario';
+import { ubicarCampos } from './ubicacion';
 import {
   calcularHuellaSHA256,
   esPDF,
@@ -256,6 +257,24 @@ export class EscaneosService {
         }
       }
       const lectura = fusionarLecturas(lecturas);
+
+      // 6b. Ubicar cada campo en ESTE escaneo con las etiquetas impresas que encontró la IA.
+      // Se usa la página con más etiquetas (el anverso). Si no hay ajuste fiable, quedan las cajas de antes.
+      const mejorPagina = lecturas
+        .map((l, i) => ({ etiquetas: l.etiquetas ?? [], pagina: i + 1 }))
+        .sort((x, y) => y.etiquetas.length - x.etiquetas.length)[0];
+      if (mejorPagina && mejorPagina.etiquetas.length > 0) {
+        const { campos, ubicacion } = ubicarCampos(lectura.campos, mejorPagina.etiquetas, mejorPagina.pagina);
+        if (ubicacion) {
+          lectura.campos = campos;
+          this.logger.log(
+            `Ubicación por etiquetas: ${ubicacion.anclasUsadas.length}/${mejorPagina.etiquetas.length} anclas, ` +
+              `error medio ${(ubicacion.errorMedio * 100).toFixed(2)} % de la página`,
+          );
+        } else {
+          this.logger.warn(`Ubicación por etiquetas descartada (${mejorPagina.etiquetas.length} etiquetas, ajuste no fiable)`);
+        }
+      }
 
       // 7. Si el N° no vino en el envío, se usa el que leyó el modelo y se revisa duplicado de nuevo
       if (!numeroReporte && lectura.numeroReporte) {
