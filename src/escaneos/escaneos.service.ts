@@ -27,26 +27,53 @@ import {
 } from './escaneos.util';
 
 const BUCKET = 'escaneos-originales';
+const COLUMNAS_EXISTENTE = 'id, numero_reporte, creado_en, enviado_por, telegram_chat_id';
 export const EMPRESA_POR_DEFECTO = '00000000-0000-0000-0000-000000000000';
 
+/** Datos del escaneo que ya existía, para que la página muestre "llegó por Telegram el 10/11". */
+export interface DatosEscaneoExistente {
+  escaneoId?: string;
+  numeroReporte?: string;
+  recibidoEn?: string;
+  origen?: 'telegram' | 'web';
+  enviadoPor?: string;
+}
+
+/**
+ * Archivo o N° de reporte repetido (HTTP 409). El cuerpo JSON lleva `codigo`
+ * ('archivo_duplicado' | 'reporte_duplicado') y, si se conocen, los datos del existente.
+ */
 export class EscaneoDuplicadoError extends ConflictException {
   constructor(
     public readonly tipoDuplicado: 'archivo_duplicado' | 'reporte_duplicado',
     mensaje: string,
-    public readonly datosExtra?: Record<string, any>,
+    public readonly datosExtra?: DatosEscaneoExistente & Record<string, any>,
   ) {
-    super(mensaje);
+    super({
+      statusCode: 409,
+      message: mensaje,
+      codigo: tipoDuplicado,
+      numeroReporte: datosExtra?.numeroReporte ?? null,
+      escaneoId: datosExtra?.escaneoId ?? null,
+      recibidoEn: datosExtra?.recibidoEn ?? null,
+      origen: datosExtra?.origen ?? null,
+      enviadoPor: datosExtra?.enviadoPor ?? null,
+    });
   }
 }
 
 /**
  * Falla del proveedor de IA (sin clave, sin respuesta, error HTTP, JSON inválido).
- * El detalle técnico va al log; el mensaje que ve la secretaria en Telegram es genérico
+ * El detalle técnico va al log; el mensaje que ve la secretaria es genérico
  * porque los errores de los proveedores son largos y no le sirven.
  */
 export class LecturaIAError extends BadGatewayException {
   constructor(public readonly detalle: string) {
-    super('No se pudo leer el reporte con la IA.');
+    super({
+      statusCode: 502,
+      codigo: 'lectura_ia',
+      message: 'No se pudo leer el reporte con la IA. No se guardó nada; intenta de nuevo en unos minutos.',
+    });
   }
 }
 
@@ -124,23 +151,28 @@ export class EscaneosService {
     const empresaId = input.empresaId || EMPRESA_POR_DEFECTO;
 
     if (!buffer || buffer.length === 0) {
-      throw new BadRequestException('El archivo enviado está vacío.');
+      throw new BadRequestException({
+        statusCode: 400,
+        codigo: 'archivo_danado',
+        message: 'El archivo está vacío o no se pudo leer. Vuelve a seleccionarlo.',
+      });
     }
 
     // 1. Huella SHA-256 y duplicado nivel 1 (mismo archivo reenviado)
     const huella = calcularHuellaSHA256(buffer);
     const { data: escaneoPorHuella } = await this.client
       .from('escaneos')
-      .select('id, numero_reporte')
+      .select(COLUMNAS_EXISTENTE)
       .eq('empresa_id', empresaId)
       .eq('huella', huella)
       .maybeSingle();
 
     if (escaneoPorHuella) {
-      throw new EscaneoDuplicadoError('archivo_duplicado', 'Este archivo ya fue enviado anteriormente.', {
-        escaneoId: escaneoPorHuella.id,
-        numeroReporte: escaneoPorHuella.numero_reporte,
-      });
+      throw new EscaneoDuplicadoError(
+        'archivo_duplicado',
+        'Este archivo ya fue enviado anteriormente.',
+        this.datosDelExistente(escaneoPorHuella),
+      );
     }
 
     // 2. N° preliminar (texto del envío o nombre del archivo) y duplicado nivel 2 (mismo papel escaneado dos veces)
@@ -277,12 +309,21 @@ export class EscaneosService {
         // 23505 = índice único: otro envío igual terminó justo antes (carrera entre dos mensajes)
         if ((errorEscaneo as any)?.code === '23505') {
           const porHuella = String(errorEscaneo?.message).includes('huella');
+          // El envío ganador ya existe: se busca para informar cuándo y por dónde llegó (si falla, se avisa sin esos datos)
+          const existente = await this.buscarExistente(
+            empresaId,
+            porHuella ? { huella } : { numero_reporte: numeroReporte },
+          );
           throw porHuella
-            ? new EscaneoDuplicadoError('archivo_duplicado', 'Este archivo ya fue enviado anteriormente.')
+            ? new EscaneoDuplicadoError(
+              'archivo_duplicado',
+              'Este archivo ya fue enviado anteriormente.',
+              existente ?? undefined,
+            )
             : new EscaneoDuplicadoError(
               'reporte_duplicado',
               `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
-              { numeroReporte },
+              { ...existente, numeroReporte: numeroReporte ?? existente?.numeroReporte },
             );
         }
         const msg = errorEscaneo?.message || 'No se obtuvo el ID del registro creado';
@@ -462,7 +503,7 @@ export class EscaneosService {
   private async verificarNumeroNoRegistrado(empresaId: string, numeroReporte: string) {
     const { data } = await this.client
       .from('escaneos')
-      .select('id, numero_reporte')
+      .select(COLUMNAS_EXISTENTE)
       .eq('empresa_id', empresaId)
       .eq('numero_reporte', numeroReporte)
       .maybeSingle();
@@ -471,8 +512,33 @@ export class EscaneosService {
       throw new EscaneoDuplicadoError(
         'reporte_duplicado',
         `El reporte N° ${numeroReporte} ya se encuentra registrado.`,
-        { numeroReporte },
+        { ...this.datosDelExistente(data), numeroReporte },
       );
+    }
+  }
+
+  /** Convierte la fila de `escaneos` en los datos que acompañan al 409. Sin chat de Telegram = subido desde la web. */
+  private datosDelExistente(fila: any): DatosEscaneoExistente {
+    return {
+      escaneoId: fila?.id,
+      numeroReporte: fila?.numero_reporte ?? undefined,
+      recibidoEn: fila?.creado_en ?? undefined,
+      origen: fila?.telegram_chat_id ? 'telegram' : 'web',
+      enviadoPor: fila?.enviado_por ?? undefined,
+    };
+  }
+
+  private async buscarExistente(
+    empresaId: string,
+    filtro: Record<string, string | null>,
+  ): Promise<DatosEscaneoExistente | null> {
+    try {
+      let consulta: any = this.client.from('escaneos').select(COLUMNAS_EXISTENTE).eq('empresa_id', empresaId);
+      for (const [col, valor] of Object.entries(filtro)) consulta = consulta.eq(col, valor);
+      const { data } = await consulta.maybeSingle();
+      return data ? this.datosDelExistente(data) : null;
+    } catch {
+      return null;
     }
   }
 

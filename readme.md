@@ -89,6 +89,38 @@ El frontend (`sirep-front`, puerto 3001) consume estos endpoints. Los datos son 
 | `GET` | `/reportes/:numero` | Un reporte con enlaces temporales (1 h) a la imagen de cada página. |
 | `PATCH` | `/reportes/:numero/campos/:campoId` | `{ "tipo": "confirmar" \| "corregir" \| "ilegible" \| "omitir" \| "reabrir", "actor": "...", "valor": "..." }` |
 
+### Subir un reporte desde la página web
+
+`POST /escaneos/upload` (requiere `Authorization: Bearer <token>`, `multipart/form-data`). **Un archivo por petición**; para subir varios, la página hace una petición por archivo.
+
+- Campos: `file` (obligatorio; PDF de 1 a `MAX_PAGINAS_REPORTE` páginas, o foto JPG/PNG/WebP, hasta `MAX_MB_ESCANEO` MB, 10 por defecto) y `numeroReporte` (opcional).
+- Queda con `enviado_por` = nombre del usuario logueado y sin chat de Telegram; la bandeja lo muestra con `canal: "web"` (los de Telegram, `canal: "telegram"`).
+- CORS: se permiten los orígenes de `FRONTEND_URL` (más localhost), con `Authorization` y multipart.
+
+**Éxito (201):**
+
+```json
+{ "escaneoId": "…", "numeroReporte": "000845", "estado": "procesado",
+  "camposDudosos": ["codigo_repuesto"], "totalPaginas": 2,
+  "campos": { }, "huella": "…", "rutasPaginas": ["…"], "metricasIA": { } }
+```
+
+`estado` es `procesado` (hay campos por revisar) o `completo`. Si no se detectó N°, `numeroReporte` es `"Sin N° detectado"`.
+
+**Errores:** siempre `{ "statusCode", "codigo", "message" }`, con `message` en español para mostrar tal cual.
+
+| HTTP | `codigo` | Cuándo |
+|---|---|---|
+| 400 | `formato_no_admitido` | No es PDF ni imagen (Word, etc.) |
+| 400 | `demasiadas_paginas` | El PDF excede `MAX_PAGINAS_REPORTE` |
+| 400 | `archivo_danado` | PDF dañado o con contraseña, o archivo vacío |
+| 400 | `falta_archivo` | No se envió el campo `file` |
+| 413 | `muy_grande` | Supera `MAX_MB_ESCANEO` |
+| 409 | `archivo_duplicado` / `reporte_duplicado` | Ya existe; trae además `numeroReporte`, `escaneoId`, `recibidoEn`, `origen` (`telegram`/`web`) y `enviadoPor` del existente (`null` si no se conocen) |
+| 502 | `lectura_ia` | Falló la IA; no se guardó nada, se puede reintentar |
+
+Ejemplo 409: `{"statusCode":409,"message":"El reporte N° 000845 ya se encuentra registrado.","codigo":"reporte_duplicado","numeroReporte":"000845","escaneoId":"…","recibidoEn":"2026-11-10T15:00:00Z","origen":"telegram","enviadoPor":"telegram"}`
+
 - Lo que leyó el modelo **nunca se sobrescribe**: la corrección se guarda aparte (`campos_extraidos.<campo>.revision`) con quién y cuándo.
 - Las columnas de `reportes` (cliente, fecha, equipo…) se actualizan con el valor vigente al corregir.
 - Si dos personas corrigen a la vez, la segunda recibe un `409` y no pisa el trabajo de la primera.

@@ -3,6 +3,8 @@ import { InternalServerErrorException, BadRequestException, Logger } from '@nest
 import { EscaneosService, EscaneoDuplicadoError, LecturaIAError } from './escaneos.service';
 import { SupabaseService } from '../common/supabase.service';
 import { LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
+import { ArgumentsHost, PayloadTooLargeException } from '@nestjs/common';
+import { SubidaEscaneoFilter } from './subida-escaneo.filter';
 import { calcularHuellaSHA256, renderizarPaginasPDF } from './escaneos.util';
 
 // El render real de PDF usa import() dinámico de un módulo ESM, que Jest no soporta.
@@ -15,6 +17,7 @@ jest.mock('./escaneos.util', () => ({
 interface Config {
   huellaExiste?: boolean;
   numeroExiste?: boolean;
+  existenteWeb?: boolean;
   errorInsertEscaneo?: any;
   errorInsertReporte?: any;
 }
@@ -56,7 +59,18 @@ describe('EscaneosService', () => {
             (filtros.includes('huella') && config.huellaExiste) ||
             (filtros.includes('numero_reporte') && config.numeroExiste);
           filtros.length = 0;
-          return { data: existe ? { id: 'uuid-existente', numero_reporte: '000845' } : null, error: null };
+          return {
+            data: existe
+              ? {
+                id: 'uuid-existente',
+                numero_reporte: '000845',
+                creado_en: '2026-11-10T15:00:00Z',
+                enviado_por: config.existenteWeb ? 'Ana' : 'telegram',
+                telegram_chat_id: config.existenteWeb ? null : 123,
+              }
+              : null,
+            error: null,
+          };
         }),
         insert: jest.fn((fila: any) => {
           (inserts[tabla] ||= []).push(fila);
@@ -284,5 +298,72 @@ describe('EscaneosService', () => {
       if (prev === undefined) delete process.env.REVISION_COMPLETA_PRIMEROS_N;
       else process.env.REVISION_COMPLETA_PRIMEROS_N = prev;
     }
+  });
+
+  describe('contrato de errores para la página web', () => {
+    it('409 archivo_duplicado: cuerpo JSON con los datos del envío existente (llegó por Telegram)', async () => {
+      config.huellaExiste = true;
+      const err = await service.procesarEscaneo({ buffer: png, filename: 'x.png' }).catch((e) => e);
+      expect(err.getStatus()).toBe(409);
+      expect(err.getResponse()).toEqual({
+        statusCode: 409,
+        message: 'Este archivo ya fue enviado anteriormente.',
+        codigo: 'archivo_duplicado',
+        numeroReporte: '000845',
+        escaneoId: 'uuid-existente',
+        recibidoEn: '2026-11-10T15:00:00Z',
+        origen: 'telegram',
+        enviadoPor: 'telegram',
+      });
+    });
+
+    it('409 reporte_duplicado: indica origen web cuando el existente no tiene chat de Telegram', async () => {
+      config.numeroExiste = true;
+      config.existenteWeb = true;
+      const err = await service
+        .procesarEscaneo({ buffer: png, caption: 'Reporte N° 000845', filename: 'scan.png' })
+        .catch((e) => e);
+      expect(err.getResponse()).toMatchObject({
+        statusCode: 409,
+        codigo: 'reporte_duplicado',
+        numeroReporte: '000845',
+        escaneoId: 'uuid-existente',
+        origen: 'web',
+        enviadoPor: 'Ana',
+      });
+      expect(err.tipoDuplicado).toBe('reporte_duplicado');
+    });
+
+    it('formato no admitido: 400 con codigo formato_no_admitido', async () => {
+      const err = await service.procesarEscaneo({ buffer: Buffer.from('PK docx'), filename: 'a.docx' }).catch((e) => e);
+      expect(err.getStatus()).toBe(400);
+      expect(err.getResponse()).toMatchObject({ codigo: 'formato_no_admitido' });
+      expect(err.message).toContain('PDF');
+    });
+
+    it('archivo vacío: 400 con codigo archivo_danado', async () => {
+      const err = await service.procesarEscaneo({ buffer: Buffer.alloc(0) }).catch((e) => e);
+      expect(err.getResponse()).toMatchObject({ statusCode: 400, codigo: 'archivo_danado' });
+    });
+
+    it('falla de la IA: 502 con codigo lectura_ia y mensaje entendible', async () => {
+      (lector.leer as jest.Mock).mockRejectedValue(new Error('HTTP 429'));
+      const err = await service.procesarEscaneo({ buffer: png, filename: 'a.png' }).catch((e) => e);
+      expect(err).toBeInstanceOf(LecturaIAError);
+      expect(err.getStatus()).toBe(502);
+      expect(err.getResponse()).toMatchObject({ statusCode: 502, codigo: 'lectura_ia' });
+      expect(err.message).toContain('No se pudo leer el reporte');
+    });
+
+    it('archivo muy grande: el filtro responde 413 con codigo muy_grande', () => {
+      const json = jest.fn();
+      const status = jest.fn(() => ({ json }));
+      const host = { switchToHttp: () => ({ getResponse: () => ({ status }) }) } as unknown as ArgumentsHost;
+      new SubidaEscaneoFilter().catch(new PayloadTooLargeException('File too large'), host);
+      expect(status).toHaveBeenCalledWith(413);
+      expect(json).toHaveBeenCalledWith(
+        expect.objectContaining({ statusCode: 413, codigo: 'muy_grande', message: expect.stringContaining('10 MB') }),
+      );
+    });
   });
 });
