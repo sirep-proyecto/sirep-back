@@ -1,4 +1,6 @@
 import { BadRequestException, ConflictException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import sharp from 'sharp';
+import { PDFDocument } from 'pdf-lib';
 import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
@@ -87,6 +89,12 @@ describe('ReportesService', () => {
               data: rutas.map((r) => ({ path: r, signedUrl: `https://storage/firmado/${r}`, error: null })),
               error: null,
             })),
+            // Páginas del escaneo en Storage: solo la 1 existe; la 2 falla para probar que se omite.
+            download: jest.fn(async (ruta: string) =>
+              ruta.endsWith('_pag_1.png')
+                ? { data: new Blob([await sharp({ create: { width: 300, height: 400, channels: 3, background: '#ffffff' } }).png().toBuffer()]), error: null }
+                : { data: null, error: { message: 'no existe' } },
+            ),
           })),
         },
       }),
@@ -121,6 +129,18 @@ describe('ReportesService', () => {
     ]);
     expect(r.campos.find((c) => c.id === 'codigo_repuesto')?.estado_revision).toBe('pendiente');
     expect(r.campos.find((c) => c.id === 'empresa')?.estado_revision).toBe('auto');
+  });
+
+  it('arma el PDF con el N° en el nombre y omite la página del escaneo que no se pudo descargar', async () => {
+    const pdf = await service.generarPdf('000214');
+    expect(pdf.filename).toBe('Reporte_000214.pdf');
+    expect(pdf.buffer.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+    // formulario + 1 página de escaneo descargada (la otra falló)
+    expect((await PDFDocument.load(pdf.buffer)).getPageCount()).toBe(2);
+  });
+
+  it('el PDF de un reporte inexistente da 404', async () => {
+    await expect(service.generarPdf('999999')).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('un reporte inexistente da 404', async () => {

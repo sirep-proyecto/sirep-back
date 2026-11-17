@@ -8,6 +8,7 @@ import {
   Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { readFile } from 'node:fs/promises';
 import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
@@ -22,6 +23,7 @@ import {
 } from '../ia-extractor/normalizacion';
 import { AccionRevisionDto } from './dto/accion-revision.dto';
 import { columnasDesdeValores } from './reportes.columnas';
+import { generarPdfReporte } from './reportes.pdf';
 import {
   COLUMNAS_EXPORTACION_RPTECH,
   FilaReporteExportable,
@@ -88,6 +90,61 @@ export class ReportesService {
     const urls = await this.firmarPaginas(fila);
     const vinculos = await this.calcularVinculosSugeridos(fila);
     return aReporteContrato(fila, urls, vinculos);
+  }
+
+  /**
+   * PDF del reporte con el formato del reporte técnico de RP-TECH y los valores ya revisados
+   * (corrección humana > lectura de la IA). Incluye un anexo con el escaneo original; si no se
+   * puede descargar el escaneo, el PDF sale igual solo con el formulario.
+   */
+  async generarPdf(numero: string): Promise<{ buffer: Buffer; filename: string }> {
+    const fila = await this.buscarFila(numero);
+    const campos = construirCampos(fila.campos_extraidos);
+    const numeroReporte = numeroVisible(fila);
+    const escaneo = await this.descargarPaginas(fila);
+    const logo = await this.leerLogo();
+    try {
+      const pdf = await generarPdfReporte(
+        { numero: numeroReporte, campos, revisadoPor: fila.corregido_por ?? null, revisadoEn: fila.fecha_correccion ?? null },
+        escaneo,
+        logo,
+      );
+      return { buffer: Buffer.from(pdf), filename: `Reporte_${numeroReporte.replace(/[^\w.-]/g, '_')}.pdf` };
+    } catch (e) {
+      this.logger.error(`No se pudo generar el PDF de ${numeroReporte}: ${(e as Error).message}`);
+      throw new InternalServerErrorException('No se pudo generar el PDF del reporte.');
+    }
+  }
+
+  /** Descarga del storage las páginas del escaneo, en orden. Una que falle se omite. */
+  private async descargarPaginas(fila: FilaReporte): Promise<Uint8Array[]> {
+    const rutas = fila.escaneo?.metadatos?.rutas_paginas?.length
+      ? fila.escaneo.metadatos.rutas_paginas
+      : fila.escaneo?.ruta_original
+        ? [fila.escaneo.ruta_original]
+        : [];
+    const paginas: Uint8Array[] = [];
+    for (const ruta of rutas) {
+      const { data, error } = await this.client.storage.from(BUCKET).download(ruta);
+      if (error || !data) {
+        this.logger.warn(`No se pudo descargar ${ruta} para el PDF: ${error?.message ?? 'sin datos'}`);
+        continue;
+      }
+      paginas.push(new Uint8Array(await data.arrayBuffer()));
+    }
+    return paginas;
+  }
+
+  /** Logo opcional del encabezado: ruta en `PDF_LOGO_PATH`; sin ella se escribe el nombre de la empresa. */
+  private async leerLogo(): Promise<Uint8Array | null> {
+    const ruta = process.env.PDF_LOGO_PATH?.trim();
+    if (!ruta) return null;
+    try {
+      return new Uint8Array(await readFile(ruta));
+    } catch (e) {
+      this.logger.warn(`No se pudo leer el logo del PDF (${ruta}): ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /**
