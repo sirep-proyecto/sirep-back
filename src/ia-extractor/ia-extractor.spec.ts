@@ -217,10 +217,68 @@ describe('Backend 1: Pieza de IA Intercambiable (Guía SIREP pág. 8-10)', () =>
         text: async () => 'Internal Server Error',
       } as any);
 
-      const lector = new OpenAILector({ apiKey: 'test-key', fetchFn: mockFetch });
+      const lector = new OpenAILector({ apiKey: 'test-key', fetchFn: mockFetch, esperaBaseMs: 0 });
       await expect(lector.leer(dummyBuffer, 'image/jpeg', camposEsperados)).rejects.toThrow(
         ProveedorIaError,
       );
+      // Un 500 es transitorio: se reintenta igual que con Gemini
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it('no reintenta una clave inválida (401)', async () => {
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: async () => 'invalid_api_key',
+      } as any);
+      const lector = new OpenAILector({ apiKey: 'mala', fetchFn: mockFetch, esperaBaseMs: 0 });
+      await expect(lector.leer(dummyBuffer, 'image/jpeg', camposEsperados)).rejects.toThrow('HTTP 401');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('devuelve la caja de cada campo y las etiquetas, igual que Gemini', async () => {
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  numero_reporte: '001',
+                  campos: { tecnico: { valor: 'Luis', confianza: 'alta', caja_2d: [100, 200, 150, 400] } },
+                  etiquetas: { empresa: [50, 20, 70, 120] },
+                }),
+              },
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        }),
+      } as any);
+      const lector = new OpenAILector({ apiKey: 'k', fetchFn: mockFetch });
+      const r = await lector.leer(dummyBuffer, 'image/jpeg', camposEsperados);
+      const tecnico = r.campos.find((c) => c.clave === 'tecnico');
+      expect(tecnico?.caja).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+      expect(r.etiquetas?.[0]?.campo).toBe('empresa');
+      // La clave va en la cabecera, nunca en el cuerpo
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.headers.Authorization).toBe('Bearer k');
+      expect(String(init.body)).not.toContain('Bearer');
+    });
+
+    it('no manda temperatura a los modelos que no la aceptan (gpt-5, o-series)', async () => {
+      const respuesta = {
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: '{"campos":{}}' } }], usage: {} }),
+      } as any;
+      const mockFetch = jest.fn().mockResolvedValue(respuesta);
+      await new OpenAILector({ apiKey: 'k', modelo: 'gpt-5-mini', fetchFn: mockFetch }).leer(
+        dummyBuffer, 'image/jpeg', camposEsperados, 0.2,
+      );
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).temperature).toBeUndefined();
+      await new OpenAILector({ apiKey: 'k', modelo: 'gpt-4.1-mini', fetchFn: mockFetch }).leer(
+        dummyBuffer, 'image/jpeg', camposEsperados, 0.2,
+      );
+      expect(JSON.parse(mockFetch.mock.calls[1][1].body).temperature).toBe(0.2);
     });
   });
 
