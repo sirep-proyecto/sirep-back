@@ -15,6 +15,8 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuthGuard } from '../auth/auth.guard';
+import { ActividadInterceptor, RegistrarActividad } from '../auth/actividad.interceptor';
+import { RequierePermiso } from '../auth/requiere-permiso.decorator';
 import { EscaneosService } from './escaneos.service';
 import { limiteMbEscaneo } from './escaneos.util';
 import { SubidaEscaneoFilter } from './subida-escaneo.filter';
@@ -22,16 +24,19 @@ import { SubidaEscaneoFilter } from './subida-escaneo.filter';
 @ApiTags('escaneos')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
+@UseInterceptors(ActividadInterceptor)
 @Controller('escaneos')
 export class EscaneosController {
   constructor(private readonly escaneosService: EscaneosService) {}
 
+  @RequierePermiso('ver_reportes')
   @Get()
   async listar(@Query('limite') limite?: string) {
     const lim = limite ? parseInt(limite, 10) : 50;
     return this.escaneosService.listarEscaneos(lim);
   }
 
+  @RequierePermiso('ver_reportes')
   @Get(':id')
   async obtenerPorId(@Param('id') id: string) {
     return this.escaneosService.obtenerEscaneoPorId(id);
@@ -58,6 +63,8 @@ export class EscaneosController {
    *        origen ('telegram' | 'web') y enviadoPor del reporte que ya existía (null si no se conocen)
    *  - 502 lectura_ia: falló la IA; no se guardó nada, se puede reintentar
    */
+  @RequierePermiso('subir_escaneos')
+  @RegistrarActividad('escaneo_subido', (req) => ({ reporte: req.body?.numeroReporte || undefined }))
   @Post('upload')
   @UseFilters(SubidaEscaneoFilter)
   @UseInterceptors(FileInterceptor('file', {

@@ -45,7 +45,6 @@ npm run build
 RPTECH_URL=https://mldjzjcmngazfyiemghp.supabase.co/functions/v1/importar-historico
 RPTECH_CLAVE=<la clave que te pasó Adrián por privado>
 RPTECH_ENVIO_AUTOMATICO=true
-BOT_CONFIG_ROLES=admin,operador
 ```
 
 5. Simula el lote sin enviar nada:
@@ -92,6 +91,6 @@ El backend de SIREP es uno solo. Lo que puede cambiar es su dirección pública,
 **Seguridad:**
 - Antes de conectar, el backend se llama a sí mismo por la dirección escrita (`/configuracion/bot/eco/:codigo`, con un código de un solo uso). Si la dirección no llega a este mismo backend, no conecta. Así nadie puede mandar las fotos de los reportes a otro servidor desde la pantalla.
 - Solo se acepta https, y los mensajes en cola no se pierden.
-- Solo los roles de `BOT_CONFIG_ROLES` lo cambian; los demás solo lo ven.
+- Solo las cuentas con el permiso «Configurar el bot de Telegram» lo cambian; las demás solo lo ven.
 
 La API de reportes ahora devuelve también `rptech_id`, `rptech_error` y `rptech_enviado_en`, para mostrar en la bandeja si el reporte ya está en RP-TECH o por qué se rechazó.

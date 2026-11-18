@@ -357,14 +357,6 @@ describe('ReportesService', () => {
       expect(r.vinculos_sugeridos).toBeDefined();
     });
 
-    it('revisar el último dudoso NO envía solo a RP-TECH: el envío es con el botón', async () => {
-      filas = [fila({}, ['codigo_repuesto'])];
-      const { enviar, svc } = conRptech();
-      await svc.revisarCampo('000214', 'codigo_repuesto', { tipo: 'confirmar', actor: 'Ana' });
-      await new Promise((r) => setTimeout(r, 20));
-      expect(enviar).not.toHaveBeenCalled();
-    });
-
     it('rechaza importar si aún tiene campos pendientes (T11)', async () => {
       filas = [fila({}, ['codigo_repuesto'])];
       await expect(conRptech().svc.importarReporteRevisado('000214')).rejects.toThrow(BadRequestException);

@@ -1,5 +1,6 @@
-import { Body, Controller, Delete, Get, NotFoundException, Param, Put, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, NotFoundException, Param, Put, Req, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ActividadInterceptor, RegistrarActividad } from '../auth/actividad.interceptor';
 import { AuthGuard } from '../auth/auth.guard';
 import { BotConfigService } from './bot-config.service';
 
@@ -8,6 +9,7 @@ const actorDe = (req: any) => req?.usuario?.nombre || req?.usuario?.email || 'de
 @ApiTags('configuracion')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
+@UseInterceptors(ActividadInterceptor)
 @Controller('configuracion')
 export class ConfiguracionController {
   constructor(private readonly bot: BotConfigService) {}
@@ -15,19 +17,21 @@ export class ConfiguracionController {
   /** Estado del bot: a qué dirección le manda Telegram los mensajes, cola y último error. */
   @Get('bot')
   estadoBot(@Req() req: any) {
-    return this.bot.estado(req?.usuario?.rol);
+    return this.bot.estado(req?.usuario?.rol, undefined, req?.usuario?.permisos);
   }
 
   /** Conecta el bot a la dirección pública de este backend. Body: { "url": "https://..." } */
+  @RegistrarActividad('bot_conectado', (req) => ({ url: String(req.body?.url ?? '') }))
   @Put('bot')
   conectarBot(@Body() body: { url?: string }, @Req() req: any) {
-    return this.bot.conectar(String(body?.url ?? ''), req?.usuario?.rol, actorDe(req));
+    return this.bot.conectar(String(body?.url ?? ''), req?.usuario?.rol, actorDe(req), undefined, req?.usuario?.permisos);
   }
 
   /** Desconecta el bot: Telegram guarda los mensajes hasta que se vuelva a conectar. */
+  @RegistrarActividad('bot_desconectado')
   @Delete('bot')
   desconectarBot(@Req() req: any) {
-    return this.bot.desconectar(req?.usuario?.rol, actorDe(req));
+    return this.bot.desconectar(req?.usuario?.rol, actorDe(req), undefined, req?.usuario?.permisos);
   }
 }
 

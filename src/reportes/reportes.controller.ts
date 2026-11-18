@@ -9,27 +9,33 @@ import {
   Req,
   Res,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { AuthGuard } from '../auth/auth.guard';
+import { ActividadInterceptor, RegistrarActividad } from '../auth/actividad.interceptor';
+import { RequierePermiso } from '../auth/requiere-permiso.decorator';
 import { AccionRevisionDto } from './dto/accion-revision.dto';
 import { ReportesService } from './reportes.service';
 
 @ApiTags('reportes')
 @ApiBearerAuth()
 @UseGuards(AuthGuard)
+@UseInterceptors(ActividadInterceptor)
 @Controller('reportes')
 export class ReportesController {
   constructor(private readonly reportes: ReportesService) {}
 
   /** Todos los reportes digitalizados, para la bandeja de revisión. */
+  @RequierePermiso('ver_reportes')
   @Get()
   listar() {
     return this.reportes.listar();
   }
 
   /** Dataset actualizable de clientes, direcciones de locales y usuarios de contacto registrados. */
+  @RequierePermiso('ver_reportes')
   @Get('dataset/clientes')
   obtenerDatasetClientes() {
     return this.reportes.obtenerDatasetClientes();
@@ -39,6 +45,8 @@ export class ReportesController {
    * SIREP-S3-T05: Exportación a Excel (.xlsx o .csv con BOM UTF-8) con los 31 campos,
    * colocando primero los 10 campos vitales y usando los nombres de columna acordados con RP-TECH.
    */
+  @RequierePermiso('exportar')
+  @RegistrarActividad('excel_exportado')
   @Get('exportar/excel')
   async exportarExcel(
     @Query('formato') formato: string | undefined,
@@ -61,6 +69,8 @@ export class ReportesController {
   }
 
   /** Alias corto para exportación directa desde la bandeja (`/reportes/exportar`). */
+  @RequierePermiso('exportar')
+  @RegistrarActividad('excel_exportado')
   @Get('exportar')
   async exportar(
     @Query('formato') formato: string | undefined,
@@ -73,6 +83,7 @@ export class ReportesController {
    * SIREP-S3-T18: Métricas agregadas por campo (sin ningún dato de clientes).
    * Con `?formato=csv` devuelve directamente `campo,total,confirmados,corregidos,ilegibles,confianza_declarada,omitidos`.
    */
+  @RequierePermiso('ver_reportes')
   @Get('metricas/campos')
   async obtenerMetricasCampos(
     @Query('formato') formato?: string,
@@ -91,6 +102,7 @@ export class ReportesController {
   }
 
   /** Alias para consumo diario automatizado (`/reportes/metricas/diarias`). */
+  @RequierePermiso('ver_reportes')
   @Get('metricas/diarias')
   obtenerMetricasDiarias(
     @Query('formato') formato?: string,
@@ -103,6 +115,8 @@ export class ReportesController {
    * SIREP-S3-T13: Paso en lote de todos los reportes ya revisados a estado cerrado/importado
    * sin volver a escanear ni consumir IA.
    */
+  @RequierePermiso('cerrar_reportes')
+  @RegistrarActividad('lote_cerrado')
   @Post('importar-lote')
   importarLote(@Req() req?: any) {
     const actor = req?.usuario?.nombre || req?.usuario?.email || 'sistema';
@@ -113,6 +127,7 @@ export class ReportesController {
    * PDF del reporte con el formato del reporte técnico de RP-TECH (hoja de la empresa),
    * con los valores ya corregidos y el escaneo original en el anexo.
    */
+  @RequierePermiso('ver_reportes')
   @Get(':numero/pdf')
   async descargarPdf(@Param('numero') numero: string, @Res() res?: Response) {
     const pdf = await this.reportes.generarPdf(numero);
@@ -128,6 +143,7 @@ export class ReportesController {
   }
 
   /** Un reporte con sus campos y los enlaces temporales a las imágenes del escaneo. */
+  @RequierePermiso('ver_reportes')
   @Get(':numero')
   obtener(@Param('numero') numero: string) {
     return this.reportes.obtener(numero);
@@ -137,6 +153,8 @@ export class ReportesController {
    * SIREP-S3-T10: Guardar vínculos (`cliente_id`, `equipo_id`, `tecnico_perfil_id`)
    * conservando intacto el texto manuscrito leído originalmente.
    */
+  @RequierePermiso('editar_campos')
+  @RegistrarActividad('vinculos_actualizados', (req) => ({ reporte: req.params?.numero }))
   @Patch(':numero/vinculos')
   vincular(
     @Param('numero') numero: string,
@@ -154,6 +172,8 @@ export class ReportesController {
    * SIREP-S3-T11: Endpoint del contrato de importación idempotente.
    * Cierra el reporte revisado y no lo duplica si se llama más de una vez.
    */
+  @RequierePermiso('cerrar_reportes')
+  @RegistrarActividad('reporte_cerrado', (req) => ({ reporte: req.params?.numero }))
   @Patch(':numero/importar')
   importar(@Param('numero') numero: string, @Req() req?: any) {
     const actor = req?.usuario?.nombre || req?.usuario?.email || 'sistema';
@@ -164,6 +184,12 @@ export class ReportesController {
    * Confirmar, corregir, marcar ilegible, omitir (vacío en el papel) o reabrir un campo.
    * SIREP-S3-T04: Cada corrección queda registrada con el usuario autenticado de la sesión.
    */
+  @RequierePermiso('editar_campos')
+  @RegistrarActividad('campo_revisado', (req) => ({
+    reporte: req.params?.numero,
+    campo: req.params?.campoId,
+    tipo: req.body?.tipo,
+  }))
   @Patch(':numero/campos/:campoId')
   revisarCampo(
     @Param('numero') numero: string,

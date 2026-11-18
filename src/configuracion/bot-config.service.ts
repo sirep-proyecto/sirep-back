@@ -19,7 +19,7 @@ import { randomBytes } from 'crypto';
  * Seguridad: antes de conectar se comprueba que la dirección escrita llegue a
  * ESTE backend (se le pide un código que solo este proceso conoce). Así nadie
  * puede mandar las fotos de los reportes a otro servidor desde la pantalla.
- * Solo los roles de BOT_CONFIG_ROLES (por defecto admin y operador) cambian algo.
+ * Solo las cuentas con el permiso configurar_bot cambian algo (se da en Configuración > Usuarios y accesos).
  */
 export const RUTA_WEBHOOK = '/telegram/webhook';
 
@@ -62,7 +62,12 @@ export class BotConfigService {
     return this.config.get<string>('TELEGRAM_WEBHOOK_SECRET')?.trim() || '';
   }
 
-  puedeCambiar(rol: string | undefined): boolean {
+  /**
+   * Con permisos por cuenta (`permisos` definido) manda el permiso `configurar_bot`.
+   * Sin ellos (solo pruebas) se usan los roles de BOT_CONFIG_ROLES.
+   */
+  puedeCambiar(rol: string | undefined, permisos?: readonly string[]): boolean {
+    if (permisos) return permisos.includes('configurar_bot');
     const roles = (this.config.get<string>('BOT_CONFIG_ROLES') ?? 'admin,operador')
       .split(',')
       .map((r) => r.trim().toLowerCase())
@@ -87,7 +92,7 @@ export class BotConfigService {
     return json.result;
   }
 
-  async estado(rol: string | undefined, fetchImpl: typeof fetch = fetch): Promise<EstadoBot> {
+  async estado(rol: string | undefined, fetchImpl: typeof fetch = fetch, permisos?: readonly string[]): Promise<EstadoBot> {
     const sugerida = this.config.get<string>('PUBLIC_URL');
     const base: EstadoBot = {
       configurado: false,
@@ -100,7 +105,7 @@ export class BotConfigService {
       mensajes_pendientes: 0,
       ultimo_error: null,
       ultimo_error_en: null,
-      puede_cambiar: this.puedeCambiar(rol),
+      puede_cambiar: this.puedeCambiar(rol, permisos),
     };
     if (!this.token) return base;
 
@@ -155,8 +160,14 @@ export class BotConfigService {
     }
   }
 
-  async conectar(direccionEscrita: string, rol: string | undefined, actor: string, fetchImpl: typeof fetch = fetch): Promise<EstadoBot> {
-    if (!this.puedeCambiar(rol)) throw new ForbiddenException('Tu rol no puede cambiar la conexión del bot.');
+  async conectar(
+    direccionEscrita: string,
+    rol: string | undefined,
+    actor: string,
+    fetchImpl: typeof fetch = fetch,
+    permisos?: readonly string[],
+  ): Promise<EstadoBot> {
+    if (!this.puedeCambiar(rol, permisos)) throw new ForbiddenException('Tu cuenta no tiene permiso para cambiar la conexión del bot.');
     const direccion = limpiarDireccion(direccionEscrita);
     if (!/^https:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(direccion)) {
       throw new BadRequestException('Escribe la dirección pública del backend, que empiece con https:// (Telegram no acepta http).');
@@ -174,14 +185,19 @@ export class BotConfigService {
       drop_pending_updates: false,
     }, fetchImpl);
     this.logger.log(`${actor} conectó el bot de Telegram a ${direccion}${RUTA_WEBHOOK}.`);
-    return this.estado(rol, fetchImpl);
+    return this.estado(rol, fetchImpl, permisos);
   }
 
-  async desconectar(rol: string | undefined, actor: string, fetchImpl: typeof fetch = fetch): Promise<EstadoBot> {
-    if (!this.puedeCambiar(rol)) throw new ForbiddenException('Tu rol no puede cambiar la conexión del bot.');
+  async desconectar(
+    rol: string | undefined,
+    actor: string,
+    fetchImpl: typeof fetch = fetch,
+    permisos?: readonly string[],
+  ): Promise<EstadoBot> {
+    if (!this.puedeCambiar(rol, permisos)) throw new ForbiddenException('Tu cuenta no tiene permiso para cambiar la conexión del bot.');
     // Sin webhook, Telegram guarda los mensajes (hasta 24 h) y los entrega al volver a conectar.
     await this.telegram('deleteWebhook', { drop_pending_updates: false }, fetchImpl);
     this.logger.log(`${actor} desconectó el bot de Telegram.`);
-    return this.estado(rol, fetchImpl);
+    return this.estado(rol, fetchImpl, permisos);
   }
 }

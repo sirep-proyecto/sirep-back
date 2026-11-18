@@ -15,8 +15,6 @@ import { construirContextoDesdeReportes, registrarEdicionEnDataset } from '../ia
 import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
 import { CAMPOS_FORMULARIO } from './campos-formulario';
-import { ubicarCampos } from './ubicacion';
-import { enParalelo, paginasEnParalelo } from './paralelo';
 import {
   calcularHuellaSHA256,
   esPDF,
@@ -236,56 +234,28 @@ export class EscaneosService {
       const enModoRevisionCompleta =
         limiteRevisionCompleta > 0 && totalReportesPrevios < limiteRevisionCompleta;
 
-      // Cada página se lee en su propia llamada (igual que antes), pero varias a la vez:
-      // no cambia lo que lee el modelo, solo el tiempo total. El límite evita saturar
-      // a Gemini (más 503/429) y la memoria del servidor. Las lecturas quedan en orden.
-      const lecturas: ResultadoLectura[] = await enParalelo(
-        imagenesPaginas,
-        paginasEnParalelo(),
-        async (pagina, indice) => {
-          const copiaIA = await optimizarParaIA(pagina);
-          try {
-            const lecturaPagina = await lector.leer(
-              copiaIA.buffer,
-              copiaIA.mimetype,
-              this.camposFormulario,
-              temperaturaConfigurada,
-              contexto,
-            );
-            // La caja del modelo es relativa a la imagen de ESTA página: se anota cuál es
-            for (const campo of lecturaPagina.campos) {
-              if (campo.caja) campo.caja.pagina = indice + 1;
-            }
-            return lecturaPagina;
-          } catch (err: any) {
-            this.logger.error(`Error en la extracción con IA (página ${indice + 1}): ${err?.message}`);
-            throw new LecturaIAError(err?.message ?? 'error desconocido');
+      const lecturas: ResultadoLectura[] = [];
+      for (const [indice, pagina] of imagenesPaginas.entries()) {
+        const copiaIA = await optimizarParaIA(pagina);
+        try {
+          const lecturaPagina = await lector.leer(
+            copiaIA.buffer,
+            copiaIA.mimetype,
+            this.camposFormulario,
+            temperaturaConfigurada,
+            contexto,
+          );
+          // La caja del modelo es relativa a la imagen de ESTA página: se anota cuál es
+          for (const campo of lecturaPagina.campos) {
+            if (campo.caja) campo.caja.pagina = indice + 1;
           }
-        },
-      );
+          lecturas.push(lecturaPagina);
+        } catch (err: any) {
+          this.logger.error(`Error en la extracción con IA: ${err?.message}`);
+          throw new LecturaIAError(err?.message ?? 'error desconocido');
+        }
+      }
       const lectura = fusionarLecturas(lecturas);
-
-      // 6b. Ubicar cada campo en ESTE escaneo con las etiquetas impresas que encontró la IA.
-      // Se usa la PRIMERA página (en orden) cuyo ajuste es fiable: normalmente el anverso.
-      // No se elige "la que tiene más etiquetas" porque en el reverso la IA también puede
-      // leer el formulario que se transparenta del otro lado.
-      let ubicada = false;
-      for (const [indice, lecturaPagina] of lecturas.entries()) {
-        const etiquetas = lecturaPagina.etiquetas ?? [];
-        if (etiquetas.length === 0) continue;
-        const { campos, ubicacion } = ubicarCampos(lectura.campos, etiquetas, indice + 1);
-        if (!ubicacion) continue;
-        lectura.campos = campos;
-        ubicada = true;
-        this.logger.log(
-          `Ubicación por etiquetas (página ${indice + 1}): ${ubicacion.anclasUsadas.length}/${etiquetas.length} anclas, ` +
-            `error medio ${(ubicacion.errorMedio * 100).toFixed(2)} % de la página`,
-        );
-        break;
-      }
-      if (!ubicada && lecturas.some((l) => (l.etiquetas ?? []).length > 0)) {
-        this.logger.warn('Ubicación por etiquetas descartada: ninguna página dio un ajuste fiable');
-      }
 
       // 7. Si el N° no vino en el envío, se usa el que leyó el modelo y se revisa duplicado de nuevo
       if (!numeroReporte && lectura.numeroReporte) {

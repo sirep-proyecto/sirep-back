@@ -10,7 +10,7 @@ Sistema para digitalizar reportes de servicio técnico industrial escritos a man
    - **Por Huella SHA-256:** Evita registrar el mismo archivo si fue reenviado.
    - **Por N° de Reporte Impreso:** Evita registrar dos veces el mismo reporte físico aunque se escanee dos veces.
 3. **Almacenamiento del Original:** El escaneo original se guarda **intacto sin comprimir** en Supabase Storage como documento legal de auditoría.
-4. **Una imagen por página:** Si llega un PDF, cada página se convierte a imagen PNG (`PDF_DPI`, 200 por defecto) y se guarda junto al original. Un PDF debe traer un solo reporte (máximo `MAX_PAGINAS_REPORTE` páginas, 10 por defecto).
+4. **Una imagen por página:** Si llega un PDF, cada página se convierte a imagen PNG (`PDF_DPI`, 200 por defecto) y se guarda junto al original. Un PDF debe traer un solo reporte (anverso y reverso, máximo `MAX_PAGINAS_REPORTE`).
 5. **Extracción Multimodal con IA:** La pieza de IA (Gemini u OpenAI) lee cada página como imagen JPEG comprimida (`IA_LADO_LARGO_PX`) y extrae los campos del formulario (`tecnico`, `empresa`, `fecha`, `equipo`, `procedimiento`, `codigo_repuesto`, etc.) con su confianza (`alta`, `media`, `baja`), marcando los ilegibles como `noLeido: true`. Si el modelo falla no se guarda nada y se avisa al chat.
 6. **Bandeja de Revisión:** Si algún campo tiene baja confianza o es dudoso, el reporte queda en estado `en_revision` para que un técnico confirme los datos con el recorte de la imagen al lado.
 
@@ -131,7 +131,7 @@ Ejemplo 409: `{"statusCode":409,"message":"El reporte N° 000845 ya se encuentra
 El reporte aprobado vive en RP-TECH. SIREP lo envía a la función `importar-historico` de RP-TECH según el contrato [docs/contrato-historico.md](docs/contrato-historico.md) (versión 1).
 
 - **Configuración:** `RPTECH_URL` y `RPTECH_CLAVE` en `.env` (la clave la entrega RP-TECH por privado). Sin las dos no se envía nada y nada se marca como importado.
-- **Cuándo se envía:** solo a mano, desde la bandeja: botón "Enviar" de cada reporte (`PATCH /reportes/:numero/importar`) o "Enviar completados a RP-TECH" (`POST /reportes/importar-lote`). También con `npm run db:migrar-revisados` (`-- --dry-run` para simular). No hay envío automático.
+- **Cuándo se envía:** al terminar de revisar un reporte histórico en la bandeja (si `RPTECH_ENVIO_AUTOMATICO` no es `false`), con `PATCH /reportes/:numero/importar`, o en lote con `POST /reportes/importar-lote` o `npm run db:migrar-revisados` (`-- --dry-run` para simular).
 - **Qué se marca:** `aprobado_rptech`, `bloqueado` e `importado_en` solo cuando RP-TECH responde que lo guardó; además se guarda `rptech_id`. Si RP-TECH lo rechaza (talonario repetido o datos que no cumplen el contrato), queda `observado` con el motivo en `rptech_error`. Sin conexión, queda como estaba para reintentar.
 - **Qué no se envía:** los ids de las tablas propias de SIREP (`cliente_id`, `equipo_id`, `tecnico_perfil_id`) ni `empresa_id`. El vínculo con los clientes reales lo hace RP-TECH.
 - **Código:** `src/rptech/rptech.envio.ts` (conversión al contrato) y `src/rptech/rptech.cliente.ts` (envío y respuesta), con sus pruebas.
@@ -144,7 +144,7 @@ En **Configuración → Bot de Telegram** se ve el bot, a qué dirección le man
 - API: `GET /configuracion/bot`, `PUT /configuracion/bot` con `{ "url": "https://..." }` y `DELETE /configuracion/bot`.
 - Antes de conectar se comprueba que la dirección escrita **llegue a este mismo backend** (`GET /configuracion/bot/eco/:codigo` con un código de un solo uso). Así nadie puede desviar las fotos de los reportes a otro servidor desde la pantalla.
 - Solo https. Los mensajes en cola no se pierden.
-- Lo cambian los roles de `BOT_CONFIG_ROLES` (por defecto `admin,operador`); los demás solo lo ven.
+- Lo cambian las cuentas con el permiso «Configurar el bot de Telegram» (se asigna en Configuración > Usuarios y accesos); las demás solo lo ven.
 
 ## 🧪 Pruebas Unitarias
 El proyecto cuenta con suites de pruebas unitarias completas con mocks (sin costo de API):

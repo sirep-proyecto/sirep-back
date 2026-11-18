@@ -9,29 +9,29 @@ describe('SIREP-S3-T04: Login en la bandeja y API protegida', () => {
   let authGuard: AuthGuard;
   let authController: AuthController;
   let mockConfig: any;
-  let mockSupabase: any;
+  let mockUsuarios: any;
+
+  const cuentaValentino = {
+    id: '22222222-2222-4222-8222-222222222222',
+    usuario: 'valentino',
+    nombre: 'Valentino',
+    rol: 'supervisor',
+    permisos: ['ver_reportes', 'editar_campos'],
+    activo: true,
+  };
 
   beforeEach(() => {
     mockConfig = {
-      get: jest.fn((key: string) => {
-        if (key === 'AUTH_JWT_SECRET') return 'test-secret-sprint3-sirep';
-        if (key === 'AUTH_USUARIOS') {
-          return 'david:claveDavid123:David Operador:operador,valentino:claveVal123:Valentino:revisor';
-        }
-        return undefined;
-      }),
+      get: jest.fn((key: string) => (key === 'AUTH_JWT_SECRET' ? 'test-secret-sprint3-sirep' : undefined)),
+    };
+    mockUsuarios = {
+      verificarCredenciales: jest.fn(async (id: string, pass: string) =>
+        id === 'valentino' && pass === 'claveVal123' ? cuentaValentino : null,
+      ),
+      obtenerParaSesion: jest.fn(async (id: string) => (id === cuentaValentino.id ? cuentaValentino : null)),
     };
 
-    mockSupabase = {
-      getClient: jest.fn(() => ({
-        auth: {
-          signInWithPassword: jest.fn().mockResolvedValue({ data: { user: null }, error: { message: 'Invalid' } }),
-          getUser: jest.fn().mockResolvedValue({ data: { user: null }, error: { message: 'Invalid token' } }),
-        },
-      })),
-    };
-
-    authService = new AuthService(mockConfig, mockSupabase);
+    authService = new AuthService(mockConfig, mockUsuarios);
     authGuard = new AuthGuard(authService);
     authController = new AuthController(authService);
   });
@@ -56,6 +56,12 @@ describe('SIREP-S3-T04: Login en la bandeja y API protegida', () => {
     await expect(authGuard.canActivate(ctx)).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
+  it('rechaza con 401 credenciales incorrectas', async () => {
+    await expect(authController.login({ usuario: 'valentino', password: 'incorrecta' })).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
   it('permite iniciar sesión con credenciales válidas y acceder a rutas protegidas con el token', async () => {
     const loginRes = await authController.login({
       usuario: 'valentino',
@@ -66,7 +72,8 @@ describe('SIREP-S3-T04: Login en la bandeja y API protegida', () => {
     expect(loginRes.usuario).toMatchObject({
       email: 'valentino@sirep.local',
       nombre: 'Valentino',
-      rol: 'revisor',
+      rol: 'supervisor',
+      permisos: ['ver_reportes', 'editar_campos'],
     });
 
     const { ctx, req } = crearContextoHttp({
@@ -80,32 +87,14 @@ describe('SIREP-S3-T04: Login en la bandeja y API protegida', () => {
     });
   });
 
-  it('acepta también tokens emitidos directamente por Supabase Auth', async () => {
-    mockSupabase.getClient.mockReturnValue({
-      auth: {
-        getUser: jest.fn().mockResolvedValue({
-          data: {
-            user: {
-              id: 'supa-uuid-1',
-              email: 'tecnico@rptech.pe',
-              user_metadata: { nombre: 'Carlos Técnico' },
-            },
-          },
-          error: null,
-        }),
-      },
-    });
-
-    const { ctx, req } = crearContextoHttp({
-      authorization: 'Bearer token-supabase-real',
-    });
-    const permitido = await authGuard.canActivate(ctx);
-    expect(permitido).toBe(true);
-    expect(req.usuario).toMatchObject({
-      id: 'supa-uuid-1',
-      email: 'tecnico@rptech.pe',
-      nombre: 'Carlos Técnico',
-    });
+  it('rechaza un token firmado que no sea de una cuenta de SIREP (por ejemplo, de antes de este cambio)', async () => {
+    const viejo = authService.emitirToken({ ...cuentaValentino, email: 'v@sirep.local', permisos: [] });
+    const [h, p, firma] = viejo.split('.');
+    const payload = JSON.parse(Buffer.from(p, 'base64url').toString('utf-8'));
+    delete payload.org;
+    const sinOrigen = [h, Buffer.from(JSON.stringify(payload)).toString('base64url'), firma].join('.');
+    const { ctx } = crearContextoHttp({ authorization: `Bearer ${sinOrigen}` });
+    await expect(authGuard.canActivate(ctx)).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
   it('registra cada corrección con el usuario autenticado de la sesión sin permitir suplantación', async () => {

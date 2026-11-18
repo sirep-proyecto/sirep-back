@@ -337,8 +337,29 @@ export class ReportesService {
 
     this.eventos?.emitirCambio('actualizado', numero);
 
-    // El envío a RP-TECH es manual (botón "Enviar" de la bandeja o "Enviar completados").
+    // Revisado por completo: se envía solo a RP-TECH (si está activado).
+    if (pendientes.length === 0 && fila.origen === 'historico' && this.envioAutomatico()) {
+      void this.enviarEnSegundoPlano(numero);
+    }
+
     return this.obtener(numero);
+  }
+
+  private envioAutomatico(): boolean {
+    return Boolean(this.rptech?.configurado()) && (process.env.RPTECH_ENVIO_AUTOMATICO ?? 'true').trim() !== 'false';
+  }
+
+  /** No hace esperar al revisor: el resultado se ve en la bandeja por el canal en vivo. */
+  private async enviarEnSegundoPlano(numero: string) {
+    try {
+      const fila = await this.buscarFila(numero);
+      const pendientes = construirCampos(fila.campos_extraidos).some((c) => c.estado_revision === 'pendiente');
+      if (pendientes || fila.bloqueado || fila.estado_reporte === 'aprobado_rptech') return;
+      await this.rptech!.enviar(fila);
+      this.eventos?.emitirCambio('actualizado', numero);
+    } catch (e) {
+      this.logger.warn(`No se pudo enviar ${numero} a RP-TECH: ${(e as Error).message}`);
+    }
   }
 
   private exigirEnvio(): RptechService {
