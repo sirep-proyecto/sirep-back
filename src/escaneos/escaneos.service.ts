@@ -10,6 +10,7 @@ import {
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
+import { IaConfigService } from '../configuracion/ia-config.service';
 import { resolverTemperaturaConfigurada } from '../ia-extractor/anthropic.proveedor';
 import { construirContextoDesdeReportes, registrarEdicionEnDataset } from '../ia-extractor/normalizacion';
 import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
@@ -113,6 +114,7 @@ export interface ResultadoProcesamientoEscaneo {
 export class EscaneosService {
   private readonly logger = new Logger(EscaneosService.name);
   private lectorIA: LectorDeReportes | null = null;
+  private lectorFijo = false;
 
   // Campos del formulario físico de GO Service Latam: ver campos-formulario.ts
   readonly camposFormulario: CampoEsperado[] = [...CAMPOS_FORMULARIO];
@@ -121,6 +123,8 @@ export class EscaneosService {
     private readonly supabase: SupabaseService,
     // Opcional para que las pruebas unitarias no necesiten el canal en vivo
     @Optional() private readonly eventos?: EventosGateway,
+    // Proveedor elegido en Configuración > Lectura con IA. Opcional: sin él (pruebas) se usa el .env
+    @Optional() private readonly iaConfig?: IaConfigService,
   ) {
     try {
       this.lectorIA = crearLectorDeReportes();
@@ -134,8 +138,10 @@ export class EscaneosService {
     return this.supabase.getClient();
   }
 
+  /** Fija un lector a mano (pruebas); tiene prioridad sobre lo elegido en Configuración. */
   setLectorIA(lector: LectorDeReportes) {
     this.lectorIA = lector;
+    this.lectorFijo = true;
   }
 
   /** Borra de Storage lo ya subido cuando el procesamiento falla, para no dejar archivos huérfanos. */
@@ -185,7 +191,7 @@ export class EscaneosService {
     }
 
     // 3. Lector de IA listo antes de guardar nada: si falta la clave no se sube basura a Storage
-    const lector = this.obtenerLector();
+    const lector = await this.obtenerLector();
 
     // 4. Una imagen por página. Se hace antes de subir para rechazar PDF dañados o demasiado largos sin dejar rastro.
     const esPdf = esPDF(buffer);
@@ -418,7 +424,16 @@ export class EscaneosService {
     }
   }
 
-  private obtenerLector(): LectorDeReportes {
+  private async obtenerLector(): Promise<LectorDeReportes> {
+    if (this.lectorFijo && this.lectorIA) return this.lectorIA;
+    if (this.iaConfig) {
+      try {
+        return await this.iaConfig.lectorActual();
+      } catch (err: any) {
+        this.logger.error(`Proveedor de IA no disponible: ${err?.message}`);
+        throw new LecturaIAError(err?.message ?? 'proveedor no configurado');
+      }
+    }
     if (this.lectorIA) return this.lectorIA;
     try {
       this.lectorIA = crearLectorDeReportes();

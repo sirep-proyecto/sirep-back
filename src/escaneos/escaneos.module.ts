@@ -2,9 +2,10 @@ import { Module } from '@nestjs/common';
 import { EscaneosController } from './escaneos.controller';
 import { EscaneosService } from './escaneos.service';
 import { CommonModule } from '../common/common.module';
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 
 @Module({
-  imports: [CommonModule],
+  imports: [CommonModule, ConfiguracionModule],
   controllers: [EscaneosController],
   providers: [EscaneosService],
   exports: [EscaneosService],

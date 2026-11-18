@@ -1,22 +1,18 @@
 import {
   CampoEsperado,
-  CampoLeido,
-  Confianza,
   ContextoAprendizaje,
   LectorDeReportes,
   ProveedorIaError,
   ResultadoLectura,
 } from './types';
+import { aplicarCorreccionesAprendidas } from './normalizacion';
+import { resolverTemperaturaConfigurada } from './anthropic.proveedor';
 import {
-  OBSERVACION_EN_BLANCO,
-  aplicarCorreccionesAprendidas,
-  casillaMarcada,
-  esCampoEnBlanco,
-} from './normalizacion';
-import {
-  resolverPromptConfigurado,
-  resolverTemperaturaConfigurada,
-} from './anthropic.proveedor';
+  construirPromptLectura,
+  enviarConReintentos,
+  normalizarCamposLeidos,
+  normalizarEtiquetas,
+} from './lectura-comun';
 
 export interface OpenAIConfig {
   apiKey: string;
@@ -24,8 +20,28 @@ export interface OpenAIConfig {
   temperatura?: number;
   promptPersonalizado?: string;
   fetchFn?: typeof fetch;
+  /** Intentos totales ante fallos transitorios (429 por límite de uso, 5xx). Por defecto 3. */
+  intentosMaximos?: number;
+  /** Espera antes del 2.º intento; se duplica en cada reintento (por defecto 2000 ms). */
+  esperaBaseMs?: number;
 }
 
+export const MODELO_OPENAI_POR_DEFECTO = 'gpt-4o-mini';
+
+/**
+ * Los modelos de razonamiento (o1, o3, o4-mini…) y la familia gpt-5 solo aceptan la
+ * temperatura por defecto: si se les manda otra responden 400. A esos no se les envía.
+ */
+export function openaiAceptaTemperatura(modelo: string): boolean {
+  return !/^(o\d|gpt-5)/i.test(modelo.trim());
+}
+
+/**
+ * Lector con ChatGPT (API de OpenAI). Usa el mismo prompt y la misma interpretación que
+ * Gemini (lectura-comun.ts), así que devuelve también las cajas de cada campo para el
+ * visor. Cada página llega como imagen (EscaneosService convierte los PDF), por eso no
+ * se acepta un PDF directo.
+ */
 export class OpenAILector implements LectorDeReportes {
   readonly nombre = 'openai';
   readonly modelo: string;
@@ -33,16 +49,20 @@ export class OpenAILector implements LectorDeReportes {
   private readonly temperaturaBase?: number;
   private readonly promptPersonalizado?: string;
   private readonly fetchFn: typeof fetch;
+  private readonly intentosMaximos: number;
+  private readonly esperaBaseMs: number;
 
   constructor(config: OpenAIConfig) {
     if (!config.apiKey) {
       throw new ProveedorIaError('openai', 'OPENAI_API_KEY no configurada');
     }
     this.apiKey = config.apiKey;
-    this.modelo = config.modelo || 'gpt-4o-mini';
+    this.modelo = config.modelo || MODELO_OPENAI_POR_DEFECTO;
     this.temperaturaBase = config.temperatura;
     this.promptPersonalizado = config.promptPersonalizado;
     this.fetchFn = config.fetchFn || globalThis.fetch.bind(globalThis);
+    this.intentosMaximos = Math.max(1, config.intentosMaximos ?? 3);
+    this.esperaBaseMs = config.esperaBaseMs ?? 2000;
   }
 
   async leer(
@@ -69,14 +89,12 @@ export class OpenAILector implements LectorDeReportes {
 
     const tempEfectiva = resolverTemperaturaConfigurada(temperatura, this.temperaturaBase);
     const inicio = Date.now();
-    const promptSistema = this.construirPrompt(campos);
-    const base64 = imagen.toString('base64');
-    const dataUrl = `data:${mimeType || 'image/jpeg'};base64,${base64}`;
+    const promptSistema = construirPromptLectura(campos, contexto, this.promptPersonalizado);
+    const dataUrl = `data:${mimeType || 'image/jpeg'};base64,${imagen.toString('base64')}`;
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       model: this.modelo,
       response_format: { type: 'json_object' },
-      temperature: tempEfectiva,
       messages: [
         { role: 'system', content: promptSistema },
         {
@@ -84,41 +102,35 @@ export class OpenAILector implements LectorDeReportes {
           content: [
             {
               type: 'text',
-              text: 'Extrae los campos del reporte técnico manuscrito adjunto siguiendo estrictamente las reglas.',
+              text: 'Extrae los campos del reporte técnico manuscrito adjunto siguiendo estrictamente las reglas. Responde solo con el JSON.',
             },
-            {
-              type: 'image_url',
-              image_url: { url: dataUrl },
-            },
+            // detail "high": la letra a mano es pequeña; con "low" la imagen se reduce a 512 px y no se lee
+            { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } },
           ],
         },
       ],
     };
+    if (openaiAceptaTemperatura(this.modelo)) payload.temperature = tempEfectiva;
 
-    let res: Response;
-    try {
-      res = await this.fetchFn('https://api.openai.com/v1/chat/completions', {
+    const res = await enviarConReintentos(
+      'openai',
+      this.fetchFn,
+      'https://api.openai.com/v1/chat/completions',
+      {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
         body: JSON.stringify(payload),
-      });
-    } catch (err: any) {
-      throw new ProveedorIaError('openai', `Error de conexión: ${err?.message ?? err}`);
-    }
-
-    if (!res.ok) {
-      const errorBody = await res.text().catch(() => '');
-      throw new ProveedorIaError('openai', `HTTP ${res.status}: ${errorBody}`, res.status);
-    }
+      },
+      this.intentosMaximos,
+      this.esperaBaseMs,
+    );
 
     const json = await res.json();
     const latenciaMs = Date.now() - inicio;
 
     const tokensEntrada = json.usage?.prompt_tokens ?? 0;
     const tokensSalida = json.usage?.completion_tokens ?? 0;
+    // Estimación con la tarifa de gpt-4o-mini; otros modelos cuestan distinto.
     const costoUsd = Number(
       ((tokensEntrada / 1_000_000) * 0.15 + (tokensSalida / 1_000_000) * 0.6).toFixed(6),
     );
@@ -131,12 +143,12 @@ export class OpenAILector implements LectorDeReportes {
     let parsed: any;
     try {
       parsed = JSON.parse(rawContent);
-    } catch (err: any) {
+    } catch {
       throw new ProveedorIaError('openai', `JSON inválido retornado por OpenAI: ${rawContent}`);
     }
 
     const camposLeidos = aplicarCorreccionesAprendidas(
-      this.normalizarCampos(parsed.campos || {}, campos),
+      normalizarCamposLeidos(parsed.campos || {}, campos),
       contexto,
     );
 
@@ -152,74 +164,7 @@ export class OpenAILector implements LectorDeReportes {
         latenciaMs,
       },
       salidaCruda: rawContent,
+      etiquetas: normalizarEtiquetas(parsed.etiquetas),
     };
-  }
-
-  private normalizarCampos(
-    camposRespuesta: Record<string, any>,
-    camposEsperados: CampoEsperado[],
-  ): CampoLeido[] {
-    return camposEsperados.map((esperado) => {
-      const extraido = camposRespuesta[esperado.clave];
-
-      if (esCampoEnBlanco(esperado, extraido)) {
-        return {
-          clave: esperado.clave,
-          valor: null,
-          confianza: 'alta' as Confianza,
-          noLeido: false,
-          dudoso: false,
-          observacion: OBSERVACION_EN_BLANCO,
-        };
-      }
-
-      if (
-        !extraido ||
-        extraido.valor === undefined ||
-        extraido.valor === null ||
-        extraido.valor === ''
-      ) {
-        return {
-          clave: esperado.clave,
-          valor: null,
-          confianza: 'baja' as Confianza,
-          noLeido: true,
-          dudoso: false,
-          observacion: extraido?.observacion || 'No detectado en el documento',
-        };
-      }
-
-      const conf: string = String(extraido.confianza || 'media').toLowerCase();
-      const confianza: Confianza =
-        conf === 'alta' ? 'alta' : conf === 'baja' ? 'baja' : 'media';
-      const dudoso = Boolean(extraido.dudoso ?? (confianza === 'baja'));
-
-      let valor = extraido.valor;
-      if (esperado.tipo === 'casilla') {
-        valor = casillaMarcada(valor);
-      } else {
-        valor = String(valor).trim();
-      }
-
-      return {
-        clave: esperado.clave,
-        valor,
-        confianza,
-        noLeido: false,
-        dudoso,
-        observacion: extraido.observacion,
-      };
-    });
-  }
-
-  private construirPrompt(campos: CampoEsperado[]): string {
-    const custom = resolverPromptConfigurado(this.promptPersonalizado);
-    const extra = custom ? `\nInstrucciones adicionales: ${custom}` : '';
-    return `Eres un transcriptor de reportes técnicos industriales manuscritos.
-No inventes datos. Si un campo no se lee, valor: null y noLeido: true.
-Casillas (tipo casilla): true si está marcada, null si no. Tipo opcion: devuelve el texto de la casilla marcada entre "opciones" o null.
-Si un campo opcional está completamente en blanco en el papel, devuelve valor: null y vacio: true (no noLeido). Si hay algo escrito que no logras leer, vacio: false y noLeido: true.${extra}
-Campos esperados: ${JSON.stringify(campos)}.
-Devuelve JSON: { "numero_reporte": string|null, "campos": { [clave]: { valor, confianza, noLeido, dudoso, observacion, vacio } } }`;
   }
 }

@@ -75,6 +75,11 @@ export function crearLectorDeReportes(opciones?: FactoryOptions): LectorDeReport
       temperatura: opciones?.openaiConfig?.temperatura ?? temperatura,
       promptPersonalizado: opciones?.openaiConfig?.promptPersonalizado ?? promptPersonalizado,
       fetchFn: opciones?.openaiConfig?.fetchFn,
+      // Mismos reintentos que Gemini salvo que se fijen aparte para OpenAI
+      intentosMaximos:
+        opciones?.openaiConfig?.intentosMaximos ?? enteroDeEnv('OPENAI_REINTENTOS') ?? enteroDeEnv('GEMINI_REINTENTOS'),
+      esperaBaseMs:
+        opciones?.openaiConfig?.esperaBaseMs ?? enteroDeEnv('OPENAI_ESPERA_MS') ?? enteroDeEnv('GEMINI_ESPERA_MS'),
     });
   }
 
