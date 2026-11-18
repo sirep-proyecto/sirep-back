@@ -65,6 +65,12 @@ export class ConfiguracionController {
     return this.ia.probar(body ?? {}, req?.usuario?.rol);
   }
 
+  /** Modelos que puede usar la clave (escrita o guardada), consultados al proveedor. Body: { proveedor, clave? } */
+  @Post('ia/modelos')
+  modelosIa(@Body() body: { proveedor?: unknown; clave?: unknown }, @Req() req: any) {
+    return this.ia.listarModelos(body ?? {}, req?.usuario?.rol);
+  }
+
   @RegistrarActividad('ia_clave_quitada', (req) => ({ proveedor: String(req.params?.proveedor ?? '') }))
   @Delete('ia/clave/:proveedor')
   quitarClaveIa(@Param('proveedor') proveedor: string, @Req() req: any) {
