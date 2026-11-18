@@ -232,7 +232,7 @@ async function prepararPaginas(escaneo: Uint8Array | Uint8Array[] | null | undef
     const buf = Buffer.from(e);
     if (esPDF(buf)) {
       try {
-        imagenes.push(...(await renderizarPaginasPDF(buf, { dpi: 150, maxPaginas: 4 })));
+        imagenes.push(...(await renderizarPaginasPDF(buf, { dpi: 150, maxPaginas: 10 })));
       } catch {
         // PDF dañado: se omite el anexo en lugar de impedir la descarga del reporte.
       }
@@ -326,7 +326,7 @@ class Hoja {
     public fi: PDFFont,
     public acento: RGB,
     public oscuro: RGB,
-  ) {}
+  ) { }
 
   nueva(): PDFPage {
     this.pagina = this.doc.addPage([this.W, this.H]);

@@ -102,7 +102,7 @@ export async function renderizarPaginasPDF(
   opciones: { dpi?: number; maxPaginas?: number } = {},
 ): Promise<Buffer[]> {
   const dpi = opciones.dpi ?? enteroDeEnv('PDF_DPI', 200);
-  const maxPaginas = opciones.maxPaginas ?? enteroDeEnv('MAX_PAGINAS_REPORTE', 4);
+  const maxPaginas = opciones.maxPaginas ?? enteroDeEnv('MAX_PAGINAS_REPORTE', 10);
 
   const importarEsm = new Function('ruta', 'return import(ruta)') as (ruta: string) => Promise<any>;
   const pdfjs = await importarEsm(
@@ -131,7 +131,7 @@ export async function renderizarPaginasPDF(
         statusCode: 400,
         codigo: 'demasiadas_paginas',
         message:
-          `El PDF tiene ${doc.numPages} páginas y el máximo por reporte es ${maxPaginas} (anverso y reverso). ` +
+          `El PDF tiene ${doc.numPages} páginas y el máximo por reporte es ${maxPaginas}. ` +
           `Envía un archivo por reporte.`,
       });
     }

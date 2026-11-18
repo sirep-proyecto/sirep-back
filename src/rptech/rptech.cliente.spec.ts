@@ -19,7 +19,7 @@ function fila(extra: Partial<FilaReporte> = {}): FilaReporte {
 }
 
 /** Supabase simulado: guarda cada update y entrega el PDF de Storage. */
-function supabaseFalso(archivo: Buffer | null = PDF) {
+function supabaseFalso(archivo: Buffer | null = PDF, sinColumnasRptech = false) {
   const updates: { tabla: string; datos: any; id: any }[] = [];
   const client: any = {
     storage: {
@@ -30,6 +30,10 @@ function supabaseFalso(archivo: Buffer | null = PDF) {
     from: (tabla: string) => ({
       update: (datos: any) => ({
         eq: async (_c: string, id: any) => {
+          // Base sin la migración del envío: rechaza cualquier update que traiga columnas rptech_*
+          if (sinColumnasRptech && Object.keys(datos).some((k) => k.startsWith('rptech_'))) {
+            return { error: { code: 'PGRST204', message: "Could not find the 'rptech_id' column of 'reportes' in the schema cache" } };
+          }
           updates.push({ tabla, datos, id });
           return { error: null };
         },
@@ -60,6 +64,17 @@ describe('Envío a RP-TECH', () => {
     expect(cuerpo.escaneo.sha256).toBe(createHash('sha256').update(PDF).digest('hex'));
     expect(Buffer.from(cuerpo.escaneo.contenido_base64, 'base64').equals(PDF)).toBe(true);
     expect(cuerpo).not.toHaveProperty('cliente_id');
+  });
+
+  it('si falta la columna rptech_id igual lo marca enviado (no queda "Por enviar")', async () => {
+    const { client, updates } = supabaseFalso(PDF, true);
+    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const r = await enviarReporte(client, fila(), CFG, responder(200, { id: 'rt-1' }) as any);
+    expect(r.estado).toBe('importado');
+    const u = updates.find((x) => x.tabla === 'reportes')!;
+    expect(u.datos).toEqual(expect.objectContaining({ estado_reporte: 'aprobado_rptech', bloqueado: true }));
+    expect(String(error.mock.calls[0][0])).toContain('20261116100000_envio_rptech.sql');
+    error.mockRestore();
   });
 
   it('201 o 200: marca aprobado_rptech con el id de RP-TECH', async () => {
