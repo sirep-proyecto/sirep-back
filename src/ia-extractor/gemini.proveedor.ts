@@ -18,6 +18,7 @@ import {
   resolverPromptConfigurado,
   resolverTemperaturaConfigurada,
 } from './anthropic.proveedor';
+import { ETIQUETAS_ANCLA } from './etiquetas-ancla';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -76,7 +77,8 @@ export class GeminiLector implements LectorDeReportes {
     const inicio = Date.now();
     const promptSistema = this.construirPrompt(campos, contexto);
     const base64Imagen = imagen.toString('base64');
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelo}:generateContent?key=${this.apiKey}`;
+    // La clave va en la cabecera y no en la URL: así no queda escrita en registros de proxies ni errores.
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelo}:generateContent`;
 
     const payload = {
       contents: [
@@ -136,7 +138,28 @@ export class GeminiLector implements LectorDeReportes {
         latenciaMs,
       },
       salidaCruda: rawText,
+      etiquetas: this.normalizarEtiquetas(parsed.etiquetas),
     };
+  }
+
+  /** Etiquetas impresas → cajas 0–1 sin margen (se usa su borde derecho exacto como ancla). */
+  private normalizarEtiquetas(bruto: unknown): Array<{ campo: string; caja: CajaCampo }> {
+    if (!bruto || typeof bruto !== 'object') return [];
+    const salida: Array<{ campo: string; caja: CajaCampo }> = [];
+    for (const [campo, caja] of Object.entries(bruto as Record<string, unknown>)) {
+      if (!(campo in ETIQUETAS_ANCLA) || !Array.isArray(caja) || caja.length !== 4) continue;
+      const n = caja.map(Number);
+      if (n.some((v) => !Number.isFinite(v))) continue;
+      const [ymin, xmin, ymax, xmax] = n.map((v) => Math.min(1000, Math.max(0, v)));
+      if (ymax <= ymin || xmax <= xmin) continue;
+      // Una etiqueta es una línea de texto: una caja enorme es una respuesta inválida
+      if (ymax - ymin > 80 || xmax - xmin > 450) continue;
+      salida.push({
+        campo,
+        caja: { x: xmin / 1000, y: ymin / 1000, ancho: (xmax - xmin) / 1000, alto: (ymax - ymin) / 1000 },
+      });
+    }
+    return salida;
   }
 
   /**
@@ -151,7 +174,7 @@ export class GeminiLector implements LectorDeReportes {
       try {
         res = await this.fetchFn(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
           body: JSON.stringify(payload),
         });
       } catch (err: any) {
@@ -360,7 +383,8 @@ REGLAS OBLIGATORIAS (Guía SIREP):
 6. Los textos largos (procedimiento, conclusión, recomendaciones) se transcriben fielmente sin corregir ortografía ni vocabulario técnico.
 7. El número de reporte impreso (sello rojo en la cabecera) debe leerse en "numero_reporte".
 8. Para cada campo con tinta que incluyas en "campos", devuelve "caja_2d": [ymin, xmin, ymax, xmax] con enteros de 0 a 1000 medidos sobre la IMAGEN COMPLETA (encerrando solo el área con el valor manuscrito, no la etiqueta impresa).
-9. En "observacion" escribe una frase corta en español SOLO cuando la confianza sea "media" o "baja" explicando qué letra o dígito generó duda. Si la confianza es "alta", omite "observacion" o déjala vacía.${bloqueContexto}${bloqueSecciones}${bloqueExtraPrompt}
+9. ETIQUETAS IMPRESAS (para ubicar el formulario en la imagen): en "etiquetas" devuelve, para cada texto IMPRESO de esta lista que veas en la imagen, su "caja_2d" [ymin, xmin, ymax, xmax] (enteros 0–1000 sobre la IMAGEN COMPLETA) encerrando SOLO las letras impresas de la etiqueta, ajustada al texto, sin incluir el recuadro ni la letra a mano que está al lado: ${JSON.stringify(ETIQUETAS_ANCLA)}. Si una etiqueta no se ve (hoja cortada o reverso), omítela.
+10. En "observacion" escribe una frase corta en español SOLO cuando la confianza sea "media" o "baja" explicando qué letra o dígito generó duda. Si la confianza es "alta", omite "observacion" o déjala vacía.${bloqueContexto}${bloqueSecciones}${bloqueExtraPrompt}
 
 CAMPOS SOLICITADOS:
 ${JSON.stringify(campos)}
@@ -378,7 +402,8 @@ Responde ESTRICTAMENTE con un objeto JSON (omitiendo de "campos" los opcionales 
       "vacio": boolean,
       "caja_2d": [ymin, xmin, ymax, xmax] | null
     }
-  }
+  },
+  "etiquetas": { "empresa": [ymin, xmin, ymax, xmax], "fecha": [ymin, xmin, ymax, xmax] }
 }`;
   }
 }
