@@ -156,6 +156,18 @@ export async function renderizarPaginasPDF(
   }
 }
 
+/**
+ * Copia de una página para guardar en Storage y mostrar en el visor: WebP.
+ * Pesa ~80-90 % menos que el PNG a 200 dpi y se lee igual; baja el espacio y,
+ * sobre todo, la transferencia (egress) cada vez que alguien abre un reporte.
+ * La calidad se puede ajustar con PAGINAS_WEBP_CALIDAD (por defecto 82).
+ * La IA no usa esta copia: lee su propia versión (`optimizarParaIA`).
+ */
+export async function paginaParaGuardar(pagina: Buffer): Promise<Buffer> {
+  const calidad = Math.min(100, Math.max(40, enteroDeEnv('PAGINAS_WEBP_CALIDAD', 82)));
+  return sharp(pagina).webp({ quality: calidad, effort: 4 }).toBuffer();
+}
+
 /** Valida que el archivo sea una imagen legible y devuelve su formato (jpg, png, webp...). */
 export async function validarImagen(buffer: Buffer): Promise<{ extension: string; mimetype: string }> {
   try {

@@ -187,9 +187,14 @@ describe('EscaneosService', () => {
     expect(upload).toHaveBeenCalledTimes(3);
     const rutas = upload.mock.calls.map((c) => c[0] as string);
     expect(rutas[0]).toMatch(/_orig\.pdf$/);
-    expect(rutas[1]).toMatch(/_pag_1\.png$/);
-    expect(rutas[2]).toMatch(/_pag_2\.png$/);
+    expect(rutas[1]).toMatch(/_pag_1\.webp$/);
+    expect(rutas[2]).toMatch(/_pag_2\.webp$/);
     expect(upload.mock.calls[0][1]).toBe(pdf); // el original va tal cual, sin comprimir
+    // Las páginas se guardan como WebP (cabecera RIFF....WEBP), no como el PNG renderizado
+    const pagina = upload.mock.calls[1][1] as Buffer;
+    expect(pagina.subarray(0, 4).toString()).toBe('RIFF');
+    expect(pagina.subarray(8, 12).toString()).toBe('WEBP');
+    expect(upload.mock.calls[1][2]).toEqual(expect.objectContaining({ contentType: 'image/webp' }));
     expect(lector.leer).toHaveBeenCalledTimes(2);
     expect(r.totalPaginas).toBe(2);
     expect(r.rutasPaginas).toHaveLength(2);

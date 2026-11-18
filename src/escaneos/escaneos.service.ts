@@ -18,6 +18,7 @@ import { CAMPOS_FORMULARIO } from './campos-formulario';
 import { ubicarCampos } from './ubicacion';
 import { enParalelo, paginasEnParalelo } from './paralelo';
 import {
+  paginaParaGuardar,
   calcularHuellaSHA256,
   esPDF,
   extraerNumeroReporte,
@@ -218,8 +219,9 @@ export class EscaneosService {
           rutasPaginas.push(rutaOriginal);
           continue;
         }
-        const ruta = `${base}_pag_${i + 1}.png`;
-        await this.subirArchivo(ruta, imagenesPaginas[i], 'image/png');
+        // Las páginas se guardan en WebP (mucho más livianas que PNG); el original queda intacto.
+        const ruta = `${base}_pag_${i + 1}.webp`;
+        await this.subirArchivo(ruta, await paginaParaGuardar(imagenesPaginas[i]), 'image/webp');
         subidos.push(ruta);
         rutasPaginas.push(ruta);
       }
