@@ -14,6 +14,7 @@
  *   --preprocesar=true|false              Activa normalización de contraste y nitidez (SIREP-S3-T17)
  *   --prompt-secciones=true|false         Activa guía de lectura por secciones del talonario (SIREP-S3-T17)
  *   --evaluador-ia=true|false             Evalúa textos largos dudosos con IA semántica si hay API key
+ *   --desde-bd=true|false                 Compara los campos guardados en Supabase contra la transcripción manual
  *   --muestra=ruta_directorio             Directorio local con PDFs o imágenes escaneadas (por defecto ./muestra)
  *   --plantilla=ruta_archivo              Archivo CSV con transcripción manual a ciegas
  *   --salida=ruta_salida.csv              Ruta del CSV resultante
@@ -71,6 +72,7 @@ const temperatura = temperaturaArg !== undefined ? Number(temperaturaArg) : unde
 const preprocesar = obtenerArg('preprocesar', process.env.IA_PREPROCESAR_IMAGEN || 'false') === 'true';
 const promptSecciones = obtenerArg('prompt-secciones', process.env.IA_PROMPT_SECCIONES || 'false') === 'true';
 const evaluadorIa = obtenerArg('evaluador-ia', 'false') === 'true';
+const desdeBd = obtenerArg('desde-bd', 'false') === 'true';
 const dirMuestra = path.resolve(obtenerArg('muestra', './muestra'));
 const archivoPlantilla = path.resolve(obtenerArg('plantilla', './muestra/transcripcion_manual.csv'));
 const dirSalidaJson = path.resolve(obtenerArg('dir-json', './resultados_json'));
@@ -95,7 +97,7 @@ console.log(`Resolución:       ${ladoLargo} px (lado largo)`);
 console.log(`Preprocesamiento: ${preprocesar ? 'activado (contraste + nitidez)' : 'desactivado'}`);
 console.log(`Prompt secciones: ${promptSecciones ? 'activado' : 'estándar'}`);
 console.log(`Evaluador IA tex: ${evaluadorIa ? 'activado' : 'similitud local'}`);
-console.log(`Carpeta muestra:  ${dirMuestra}`);
+console.log(`Origen de lectura:${desdeBd ? ' Supabase BD (campos_extraidos)' : ` ${dirMuestra}`}`);
 console.log(`Plantilla ref:    ${archivoPlantilla}`);
 console.log(`Salida CSV:       ${rutaCsvSalida}`);
 console.log('='.repeat(70));
@@ -221,24 +223,6 @@ Leído por OCR/IA: "${leido}"
   }
 }
 
-const factoryMod = await import('../dist/ia-extractor/ia-extractor.factory.js');
-const { crearLectorDeReportes } = factoryMod;
-
-const lector = crearLectorDeReportes({
-  proveedor,
-  modelo,
-  temperatura,
-  geminiConfig: { modelo, temperatura },
-  openaiConfig: { modelo, temperatura },
-  anthropicConfig: { modelo, temperatura },
-});
-
-const archivosMuestra = fs.existsSync(dirMuestra)
-  ? fs.readdirSync(dirMuestra).filter((f) => /\.(pdf|jpe?g|png|webp)$/i.test(f))
-  : [];
-
-console.log(`Archivos encontrados en muestra: ${archivosMuestra.length}`);
-
 const plantillaRef = cargarPlantillaReferencia(archivoPlantilla);
 const filasCsv = [];
 const cabeceraCsv = 'reporte,campo,valor esperado,valor leído,confianza,resultado,costo,tiempo';
@@ -252,124 +236,263 @@ function escaparCsv(val) {
 
 let costoTotalUsd = 0;
 let tiempoTotalMs = 0;
+let totalReportesProcesados = 0;
 let totalCamposConReferencia = 0;
 let totalSinReferencia = 0;
 let aciertos = 0;
+let erroresTotal = 0;
+let noLeidosTotal = 0;
+let dudososEvalTotal = 0;
 let erroresAltaConfianza = 0;
 const statsPorCampo = new Map();
+const statsPorConfianza = new Map([
+  ['alta', { total: 0, correctos: 0, vaciosCorrectos: 0, errores: 0, noLeidos: 0, dudosos: 0 }],
+  ['media', { total: 0, correctos: 0, vaciosCorrectos: 0, errores: 0, noLeidos: 0, dudosos: 0 }],
+  ['baja', { total: 0, correctos: 0, vaciosCorrectos: 0, errores: 0, noLeidos: 0, dudosos: 0 }],
+]);
 const porcentajesCorreccionPorReporte = [];
+const detalleCorreccionPorReporte = [];
 
-for (let idx = 0; idx < archivosMuestra.length; idx++) {
-  const archivo = archivosMuestra[idx];
-  const nombreReporte = path.basename(archivo, path.extname(archivo));
-  const rutaCompleta = path.join(dirMuestra, archivo);
+async function evaluarCamposDeReporte(nombreReporte, camposLeidos, ref, costoUsd = 0, tiempoMs = 0) {
+  let camposQueRequierenCorreccion = 0;
 
-  console.log(`\n[${idx + 1}/${archivosMuestra.length}] Procesando reporte: ${archivo}...`);
-  const bufferOriginal = fs.readFileSync(rutaCompleta);
+  for (const campo of camposLeidos) {
+    if (campo.dudoso || campo.confianza === 'baja' || campo.noLeido) {
+      camposQueRequierenCorreccion++;
+    }
 
-  const tInicio = Date.now();
-  try {
-    let buffersImagenes = [];
-    if (esPDF(bufferOriginal)) {
-      const paginasPng = await renderizarPaginasPDF(bufferOriginal, { dpi: 200 });
-      for (const png of paginasPng) {
-        const opt = await optimizarParaIA(png, {
+    const esperado = ref && ref[campo.clave] !== undefined ? ref[campo.clave] : undefined;
+    const def = camposFormulario.find((c) => c.clave === campo.clave) || { tipo: 'texto' };
+    const evaluacion = compararCampo(campo.clave, def.tipo, esperado, campo.valor, Boolean(campo.noLeido));
+
+    if (
+      evaluacion.resultado === 'dudoso' &&
+      ['procedimiento', 'conclusion', 'recomendaciones'].includes(campo.clave)
+    ) {
+      const eqIa = await evaluarTextoLargoSemantico(campo.clave, evaluacion.valorEsperado, evaluacion.valorLeido);
+      if (eqIa === true) evaluacion.resultado = 'correcto';
+      else if (eqIa === false) evaluacion.resultado = 'error';
+    }
+
+    const conf = ['alta', 'media', 'baja'].includes(String(campo.confianza).toLowerCase())
+      ? String(campo.confianza).toLowerCase()
+      : 'baja';
+
+    if (evaluacion.resultado === 'sin referencia') {
+      totalSinReferencia++;
+    } else {
+      totalCamposConReferencia++;
+      const stat = statsPorCampo.get(campo.clave) || {
+        total: 0,
+        correctos: 0,
+        vaciosCorrectos: 0,
+        errores: 0,
+        noLeidos: 0,
+        dudosos: 0,
+        erroresAltaConf: 0,
+        alta: 0,
+        media: 0,
+        baja: 0,
+      };
+      stat.total++;
+      stat[conf]++;
+
+      const confStat = statsPorConfianza.get(conf);
+      if (confStat) confStat.total++;
+
+      if (evaluacion.resultado === 'correcto') {
+        aciertos++;
+        stat.correctos++;
+        if (confStat) confStat.correctos++;
+      } else if (evaluacion.resultado === 'vacío correcto') {
+        aciertos++;
+        stat.vaciosCorrectos++;
+        if (confStat) confStat.vaciosCorrectos++;
+      } else if (evaluacion.resultado === 'no leído') {
+        noLeidosTotal++;
+        stat.noLeidos++;
+        if (confStat) confStat.noLeidos++;
+      } else if (evaluacion.resultado === 'dudoso') {
+        dudososEvalTotal++;
+        stat.dudosos++;
+        if (confStat) confStat.dudosos++;
+      } else if (evaluacion.resultado === 'error') {
+        erroresTotal++;
+        stat.errores++;
+        if (confStat) confStat.errores++;
+        if (conf === 'alta') {
+          erroresAltaConfianza++;
+          stat.erroresAltaConf++;
+        }
+      }
+      statsPorCampo.set(campo.clave, stat);
+    }
+
+    filasCsv.push([
+      escaparCsv(nombreReporte),
+      escaparCsv(campo.clave),
+      escaparCsv(evaluacion.valorEsperado),
+      escaparCsv(evaluacion.valorLeido),
+      escaparCsv(conf),
+      escaparCsv(evaluacion.resultado),
+      escaparCsv(Number(costoUsd || 0).toFixed(6)),
+      escaparCsv(tiempoMs || 0),
+    ].join(','));
+  }
+
+  if (camposLeidos.length > 0) {
+    const pct = (camposQueRequierenCorreccion / camposLeidos.length) * 100;
+    porcentajesCorreccionPorReporte.push(pct);
+    detalleCorreccionPorReporte.push({
+      reporte: nombreReporte,
+      dudosos: camposQueRequierenCorreccion,
+      total: camposLeidos.length,
+      pct,
+    });
+  }
+}
+
+if (desdeBd) {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_KEY;
+  if (!url || !key) {
+    console.error('Faltan SUPABASE_URL o SUPABASE_KEY en .env para --desde-bd=true.');
+    process.exit(1);
+  }
+  const { createClient } = await import('@supabase/supabase-js');
+  const supabase = createClient(url, key, { auth: { persistSession: false } });
+  const idsObjetivo = [...plantillaRef.keys()];
+  if (idsObjetivo.length === 0) {
+    console.error('La plantilla de referencia está vacía; no hay reportes para evaluar.');
+    process.exit(1);
+  }
+
+  const { data: filasBd, error: errBd } = await supabase
+    .from('reportes')
+    .select('numero_talonario, campos_extraidos, escaneo:escaneos(metadatos)')
+    .in('numero_talonario', idsObjetivo);
+
+  if (errBd) {
+    console.error('Error leyendo reportes de Supabase:', errBd.message);
+    process.exit(1);
+  }
+
+  const porNumero = new Map();
+  for (const r of filasBd ?? []) {
+    if (r.numero_talonario && !porNumero.has(r.numero_talonario)) {
+      porNumero.set(r.numero_talonario, r);
+    }
+  }
+
+  for (const idRef of idsObjetivo) {
+    const filaBd = porNumero.get(idRef);
+    const ref = plantillaRef.get(idRef);
+    if (!filaBd) {
+      console.warn(`Aviso: Reporte ${idRef} de la plantilla no encontrado en Supabase.`);
+      continue;
+    }
+    const extraidos = filaBd.campos_extraidos ?? {};
+    const esc = Array.isArray(filaBd.escaneo) ? filaBd.escaneo[0] : filaBd.escaneo;
+    const uso = esc?.metadatos?.uso ?? {};
+    costoTotalUsd += Number(uso.costoUsd || 0);
+    tiempoTotalMs += Number(uso.latenciaMs || 0);
+    totalReportesProcesados++;
+
+    const camposLeidos = camposFormulario.map((def) => {
+      const c = extraidos[def.clave];
+      return {
+        clave: def.clave,
+        valor: c?.valor ?? null,
+        confianza: c?.confianza ?? 'baja',
+        noLeido: c ? Boolean(c.noLeido) : true,
+        dudoso: c ? Boolean(c.dudoso) : false,
+      };
+    });
+
+    await evaluarCamposDeReporte(idRef, camposLeidos, ref, Number(uso.costoUsd || 0), Number(uso.latenciaMs || 0));
+  }
+} else {
+  const factoryMod = await import('../dist/ia-extractor/ia-extractor.factory.js');
+  const { crearLectorDeReportes } = factoryMod;
+
+  const lector = crearLectorDeReportes({
+    proveedor,
+    modelo,
+    temperatura,
+    geminiConfig: { modelo, temperatura },
+    openaiConfig: { modelo, temperatura },
+    anthropicConfig: { modelo, temperatura },
+  });
+
+  const archivosMuestra = fs.existsSync(dirMuestra)
+    ? fs.readdirSync(dirMuestra).filter((f) => /\.(pdf|jpe?g|png|webp)$/i.test(f))
+    : [];
+
+  console.log(`Archivos encontrados en muestra: ${archivosMuestra.length}`);
+
+  for (let idx = 0; idx < archivosMuestra.length; idx++) {
+    const archivo = archivosMuestra[idx];
+    const nombreReporte = path.basename(archivo, path.extname(archivo));
+    const rutaCompleta = path.join(dirMuestra, archivo);
+
+    console.log(`\n[${idx + 1}/${archivosMuestra.length}] Procesando reporte: ${archivo}...`);
+    const bufferOriginal = fs.readFileSync(rutaCompleta);
+
+    const tInicio = Date.now();
+    try {
+      let buffersImagenes = [];
+      if (esPDF(bufferOriginal)) {
+        const paginasPng = await renderizarPaginasPDF(bufferOriginal, { dpi: 200 });
+        for (const png of paginasPng) {
+          const opt = await optimizarParaIA(png, {
+            ladoLargo,
+            normalizarContraste: preprocesar,
+            nitidez: preprocesar,
+          });
+          buffersImagenes.push(opt.buffer);
+        }
+      } else {
+        const opt = await optimizarParaIA(bufferOriginal, {
           ladoLargo,
           normalizarContraste: preprocesar,
           nitidez: preprocesar,
         });
         buffersImagenes.push(opt.buffer);
       }
-    } else {
-      const opt = await optimizarParaIA(bufferOriginal, {
-        ladoLargo,
-        normalizarContraste: preprocesar,
-        nitidez: preprocesar,
-      });
-      buffersImagenes.push(opt.buffer);
-    }
 
-    const lecturasPaginas = [];
-    for (let p = 0; p < buffersImagenes.length; p++) {
-      const resPagina = await lector.leer(buffersImagenes[p], 'image/jpeg', camposFormulario, temperatura);
-      lecturasPaginas.push(resPagina);
-    }
-
-    const res = fusionarLecturas(lecturasPaginas);
-    const tiempoMs = Date.now() - tInicio;
-    tiempoTotalMs += tiempoMs;
-    costoTotalUsd += res.uso.costoUsd;
-
-    console.log(`N° Reporte: ${res.numeroReporte || 'S/N'} | Tokens: ${res.uso.tokensEntrada}+${res.uso.tokensSalida} | Costo: $${res.uso.costoUsd.toFixed(6)} | Tiempo: ${tiempoMs} ms`);
-
-    const rutaJson = path.join(dirSalidaJson, `${nombreReporte}_${proveedor}_${ladoLargo}px${sufijoPre}.json`);
-    fs.writeFileSync(rutaJson, JSON.stringify(res, null, 2), 'utf-8');
-
-    const idRef = res.numeroReporte || nombreReporte;
-    const ref = plantillaRef.get(idRef) || plantillaRef.get(nombreReporte) || null;
-    let camposQueRequierenCorreccion = 0;
-
-    for (const campo of res.campos) {
-      if (campo.dudoso || campo.confianza === 'baja' || campo.noLeido) {
-        camposQueRequierenCorreccion++;
+      const lecturasPaginas = [];
+      for (let p = 0; p < buffersImagenes.length; p++) {
+        const resPagina = await lector.leer(buffersImagenes[p], 'image/jpeg', camposFormulario, temperatura);
+        lecturasPaginas.push(resPagina);
       }
 
-      const esperado = ref && ref[campo.clave] !== undefined ? ref[campo.clave] : undefined;
-      const def = camposFormulario.find((c) => c.clave === campo.clave) || { tipo: 'texto' };
-      const evaluacion = compararCampo(campo.clave, def.tipo, esperado, campo.valor, campo.noLeido);
+      const res = fusionarLecturas(lecturasPaginas);
+      const tiempoMs = Date.now() - tInicio;
+      tiempoTotalMs += tiempoMs;
+      costoTotalUsd += res.uso.costoUsd;
+      totalReportesProcesados++;
 
-      if (
-        evaluacion.resultado === 'dudoso' &&
-        ['procedimiento', 'conclusion', 'recomendaciones'].includes(campo.clave)
-      ) {
-        const eqIa = await evaluarTextoLargoSemantico(campo.clave, evaluacion.valorEsperado, evaluacion.valorLeido);
-        if (eqIa === true) evaluacion.resultado = 'correcto';
-        else if (eqIa === false) evaluacion.resultado = 'error';
-      }
+      console.log(`N° Reporte: ${res.numeroReporte || 'S/N'} | Tokens: ${res.uso.tokensEntrada}+${res.uso.tokensSalida} | Costo: $${res.uso.costoUsd.toFixed(6)} | Tiempo: ${tiempoMs} ms`);
 
-      if (evaluacion.resultado === 'sin referencia') {
-        totalSinReferencia++;
-      } else {
-        totalCamposConReferencia++;
-        const stat = statsPorCampo.get(campo.clave) || { total: 0, correctos: 0, erroresAltaConf: 0 };
-        stat.total++;
-        if (evaluacion.resultado === 'correcto' || evaluacion.resultado === 'vacío correcto') {
-          aciertos++;
-          stat.correctos++;
-        } else if (evaluacion.resultado === 'error' && campo.confianza === 'alta') {
-          erroresAltaConfianza++;
-          stat.erroresAltaConf++;
-        }
-        statsPorCampo.set(campo.clave, stat);
-      }
+      const rutaJson = path.join(dirSalidaJson, `${nombreReporte}_${proveedor}_${ladoLargo}px${sufijoPre}.json`);
+      fs.writeFileSync(rutaJson, JSON.stringify(res, null, 2), 'utf-8');
 
+      const idRef = res.numeroReporte || nombreReporte;
+      const ref = plantillaRef.get(idRef) || plantillaRef.get(nombreReporte) || null;
+      await evaluarCamposDeReporte(nombreReporte, res.campos, ref, res.uso.costoUsd, tiempoMs);
+    } catch (err) {
+      console.error(`Error en reporte ${nombreReporte}: ${err.message}`);
       filasCsv.push([
         escaparCsv(nombreReporte),
-        escaparCsv(campo.clave),
-        escaparCsv(evaluacion.valorEsperado),
-        escaparCsv(evaluacion.valorLeido),
-        escaparCsv(campo.confianza),
-        escaparCsv(evaluacion.resultado),
-        escaparCsv(res.uso.costoUsd.toFixed(6)),
-        escaparCsv(tiempoMs),
+        'ERROR_GLOBAL',
+        '""',
+        escaparCsv(err.message),
+        'baja',
+        'error',
+        '0',
+        Date.now() - tInicio,
       ].join(','));
     }
-
-    if (res.campos.length > 0) {
-      porcentajesCorreccionPorReporte.push((camposQueRequierenCorreccion / res.campos.length) * 100);
-    }
-  } catch (err) {
-    console.error(`Error en reporte ${nombreReporte}: ${err.message}`);
-    filasCsv.push([
-      escaparCsv(nombreReporte),
-      'ERROR_GLOBAL',
-      '""',
-      escaparCsv(err.message),
-      'baja',
-      'error',
-      '0',
-      Date.now() - tInicio,
-    ].join(','));
   }
 }
 
@@ -381,23 +504,34 @@ const promedioCorreccion =
   porcentajesCorreccionPorReporte.length > 0
     ? porcentajesCorreccionPorReporte.reduce((a, b) => a + b, 0) / porcentajesCorreccionPorReporte.length
     : 0;
+const peorReporte = detalleCorreccionPorReporte.reduce(
+  (max, r) => (!max || r.dudosos > max.dudosos ? r : max),
+  null,
+);
 
 console.log('\n' + '='.repeat(70));
 console.log('                 RESUMEN DE EVALUACIÓN Y EXPERIMENTO');
 console.log('='.repeat(70));
 console.log(`Configuración:               ${proveedor} / ${modelo} / ${ladoLargo}px / pre=${preprocesar}`);
-console.log(`Reportes procesados:         ${archivosMuestra.length}`);
-console.log(`Tiempo promedio:             ${archivosMuestra.length > 0 ? Math.round(tiempoTotalMs / archivosMuestra.length) : 0} ms / reporte`);
+console.log(`Reportes procesados:         ${totalReportesProcesados}`);
+console.log(`Tiempo promedio:             ${totalReportesProcesados > 0 ? Math.round(tiempoTotalMs / totalReportesProcesados) : 0} ms / reporte`);
 console.log(`Costo acumulado:             $${costoTotalUsd.toFixed(5)} USD`);
-console.log(`% campos a revisión/reporte: ${promedioCorreccion.toFixed(1)}%`);
+console.log(`% campos a revisión/reporte: ${promedioCorreccion.toFixed(1)}%${peorReporte ? ` (peor: ${peorReporte.reporte} con ${peorReporte.dudosos}/${peorReporte.total})` : ''}`);
 console.log(`Campos sin referencia:       ${totalSinReferencia}`);
 if (totalCamposConReferencia > 0) {
-  console.log(`Precisión global (con ref):  ${((aciertos / totalCamposConReferencia) * 100).toFixed(1)}%`);
+  console.log(`Precisión global (con ref):  ${((aciertos / totalCamposConReferencia) * 100).toFixed(2)}% (${aciertos}/${totalCamposConReferencia})`);
+  console.log(`Errores / No leídos / Dud.:  ${erroresTotal} / ${noLeidosTotal} / ${dudososEvalTotal}`);
   console.log(`Errores alta confianza:      ${erroresAltaConfianza} (${((erroresAltaConfianza / totalCamposConReferencia) * 100).toFixed(2)}%)`);
+  console.log('\nConfianza vs acierto:');
+  for (const [nivel, cs] of statsPorConfianza.entries()) {
+    const ac = cs.correctos + cs.vaciosCorrectos;
+    console.log(`  - ${nivel.padEnd(8)} total=${cs.total} | aciertos=${ac} (llenos=${cs.correctos}, vacíos=${cs.vaciosCorrectos}) | errores=${cs.errores} | noLeidos=${cs.noLeidos} | dudosos=${cs.dudosos}`);
+  }
   console.log('\nPrecisión por campo:');
   for (const [clave, st] of statsPorCampo.entries()) {
-    const pct = ((st.correctos / st.total) * 100).toFixed(1);
-    console.log(`  - ${clave.padEnd(22)} ${pct}% (${st.correctos}/${st.total}) | errores alta conf: ${st.erroresAltaConf}`);
+    const ac = st.correctos + st.vaciosCorrectos;
+    const pct = ((ac / st.total) * 100).toFixed(1);
+    console.log(`  - ${clave.padEnd(22)} ${pct}% (llenos=${st.correctos}, vacíos=${st.vaciosCorrectos}, err=${st.errores}, nl=${st.noLeidos}, dud=${st.dudosos}) | conf=${st.alta}/${st.media}/${st.baja} | errAltaConf=${st.erroresAltaConf}`);
   }
 }
 console.log(`CSV exportado:               ${rutaCsvSalida}`);
