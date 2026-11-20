@@ -54,6 +54,8 @@ export interface CampoContrato {
 }
 
 export const DISENO_TALONARIO = 'talonario-go-service-carta';
+/** SIREP-S4-T03: Si la reserva pasa 4 horas sin cerrarse, el reporte vuelve a la cola. */
+export const DURACION_RESERVA_MS = 4 * 60 * 60 * 1000;
 
 /** Mismo criterio con el que se decide qué campos llegan a la bandeja de revisión. */
 export function campoRequiereRevision(campo: CampoGuardado | undefined | null): boolean {
@@ -150,6 +152,12 @@ export interface FilaReporte {
   cliente_id?: string | null;
   equipo_id?: string | null;
   tecnico_perfil_id?: string | null;
+  reservado_por_id?: string | null;
+  reservado_por?: string | null;
+  reservado_en?: string | null;
+  doble_revision_estado?: string | null;
+  doble_revision_por?: string | null;
+  doble_revision_coincidencia?: number | null;
   corregido_por?: string | null;
   fecha_correccion?: string | null;
   cliente: string | null;
@@ -165,6 +173,49 @@ export interface FilaReporte {
 /** Los reportes sin N° legible se identifican por el inicio de su id para poder abrirlos igual desde la bandeja. */
 export function numeroVisible(fila: Pick<FilaReporte, 'id' | 'numero_talonario'>): string {
   return fila.numero_talonario ?? `SN-${fila.id.slice(0, 8)}`;
+}
+
+/**
+ * Extrae la reserva vigente ya sea de las columnas dedicadas o del respaldo en `datos_originales.__reserva`
+ * (permite funcionar incluso antes de aplicar la migración de columnas en Supabase).
+ */
+export function reservaDeFila(
+  fila: Pick<
+    FilaReporte,
+    'reservado_por' | 'reservado_por_id' | 'reservado_en' | 'datos_originales'
+  >,
+): { reservado_por_id: string | null; reservado_por: string | null; reservado_en: string | null } {
+  const resv = fila.datos_originales?.__reserva as
+    | { reservado_por_id?: string | null; reservado_por?: string | null; reservado_en?: string | null }
+    | undefined;
+  return {
+    reservado_por_id: fila.reservado_por_id ?? resv?.reservado_por_id ?? null,
+    reservado_por: fila.reservado_por ?? resv?.reservado_por ?? null,
+    reservado_en: fila.reservado_en ?? resv?.reservado_en ?? null,
+  };
+}
+
+/**
+ * SIREP-S4-T03: Determina si una reserva sigue vigente (< 4 horas y el reporte no está cerrado).
+ * Si han pasado 4 horas o más, la reserva está vencida y el reporte vuelve a la cola.
+ */
+export function reservaActiva(
+  fila: Pick<
+    FilaReporte,
+    'reservado_por' | 'reservado_por_id' | 'reservado_en' | 'bloqueado' | 'estado_reporte' | 'datos_originales'
+  >,
+  ahoraMs = Date.now(),
+): boolean {
+  if (fila.bloqueado || fila.estado_reporte === 'aprobado_rptech' || fila.estado_reporte === 'cerrado') {
+    return false;
+  }
+  const { reservado_por, reservado_en } = reservaDeFila(fila);
+  if (!reservado_por || !reservado_en) {
+    return false;
+  }
+  const ts = Date.parse(reservado_en);
+  if (!Number.isFinite(ts)) return false;
+  return ahoraMs - ts < DURACION_RESERVA_MS;
 }
 
 export interface SugerenciaVinculo {
@@ -189,6 +240,27 @@ export function aReporteContrato(
   const estado = derivarEstado(campos);
   const escaneo = fila.escaneo;
   const numero = numeroVisible(fila);
+  const resv = reservaDeFila(fila);
+  const activa = reservaActiva(fila);
+  const expiraIso =
+    activa && resv.reservado_en
+      ? new Date(Date.parse(resv.reservado_en) + DURACION_RESERVA_MS).toISOString()
+      : null;
+  const dobleRev = fila.datos_originales?.__doble_revision as
+    | { estado?: string; porcentaje_coincidencia?: number }
+    | undefined;
+  const estadoDoble =
+    dobleRev?.estado === 'pendiente' || fila.doble_revision_estado === 'pendiente'
+      ? ('pendiente' as const)
+      : dobleRev?.estado === 'completada' || fila.doble_revision_estado === 'completada'
+        ? ('completada' as const)
+        : null;
+  const coincidenciaDoble =
+    estadoDoble === 'completada'
+      ? (typeof dobleRev?.porcentaje_coincidencia === 'number'
+          ? dobleRev.porcentaje_coincidencia
+          : (fila.doble_revision_coincidencia ?? null))
+      : null;
 
   return {
     id: fila.id,
@@ -206,6 +278,13 @@ export function aReporteContrato(
     equipo_id: fila.equipo_id ?? null,
     tecnico_perfil_id: fila.tecnico_perfil_id ?? null,
     importado_en: fila.importado_en ?? null,
+    reservado_por_id: activa ? (resv.reservado_por_id ?? null) : null,
+    reservado_por: activa ? (resv.reservado_por ?? null) : null,
+    reservado_en: activa ? (resv.reservado_en ?? null) : null,
+    reserva_expira_en: expiraIso,
+    doble_revision_pendiente: estadoDoble === 'pendiente',
+    doble_revision_estado: estadoDoble,
+    doble_revision_coincidencia: coincidenciaDoble,
     // Envío a RP-TECH: id allá, último rechazo o fallo (para mostrar el motivo en la bandeja) y fecha del intento.
     rptech_id: fila.rptech_id ?? null,
     rptech_error: fila.rptech_error ?? null,

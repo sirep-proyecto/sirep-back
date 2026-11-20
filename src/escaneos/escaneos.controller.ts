@@ -31,9 +31,9 @@ export class EscaneosController {
 
   @RequierePermiso('ver_reportes')
   @Get()
-  async listar(@Query('limite') limite?: string) {
+  async listar(@Query('limite') limite?: string, @Req() req?: any) {
     const lim = limite ? parseInt(limite, 10) : 50;
-    return this.escaneosService.listarEscaneos(lim);
+    return this.escaneosService.listarEscaneos(lim, req?.usuario);
   }
 
   @RequierePermiso('ver_reportes')
@@ -95,6 +95,7 @@ export class EscaneosController {
       caption: numeroReporte,
       mimetype: file.mimetype,
       enviadoPor: remitente,
+      enviadoPorId: req?.usuario?.id,
     });
   }
 }

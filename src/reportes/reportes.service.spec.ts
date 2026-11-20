@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
 import { RptechService } from '../rptech/rptech.service';
@@ -357,12 +357,12 @@ describe('ReportesService', () => {
       expect(r.vinculos_sugeridos).toBeDefined();
     });
 
-    it('revisar el último dudoso NO envía solo a RP-TECH: el envío es con el botón', async () => {
+    it('SIREP-S4-T10: al aprobar el último dudoso envía automáticamente a RP-TECH si está configurado', async () => {
       filas = [fila({}, ['codigo_repuesto'])];
       const { enviar, svc } = conRptech();
+      svc.configurarSelectorDobleRevision(() => 0.99);
       await svc.revisarCampo('000214', 'codigo_repuesto', { tipo: 'confirmar', actor: 'Ana' });
-      await new Promise((r) => setTimeout(r, 20));
-      expect(enviar).not.toHaveBeenCalled();
+      expect(enviar).toHaveBeenCalledTimes(1);
     });
 
     it('rechaza importar si aún tiene campos pendientes (T11)', async () => {
@@ -487,6 +487,129 @@ describe('ReportesService', () => {
       expect(metricas.csv).toMatch(/direccion,1,0,0,0,[^,]*,1\n/);
       expect(metricas.csv).toMatch(/empresa,1,0,1,0,[^,]*,0\n/);
       expect(metricas.metricas.find((m) => m.campo === 'direccion')).toMatchObject({ omitidos: 1, ilegibles: 0 });
+    });
+  });
+
+  describe('SIREP-S4-T02 y T03: Cola libre con reserva de 4 horas y vista por rol', () => {
+    const tBase = Date.now();
+
+    it('entrega el reporte pendiente más antiguo y mantiene una sola reserva activa por revisor', async () => {
+      const repNuevo = fila({ id: 'rep-nuevo', numero_talonario: '000302', creado_en: '2026-11-10T10:00:00Z' }, ['codigo_repuesto']);
+      const repAntiguo = fila({ id: 'rep-antiguo', numero_talonario: '000301', creado_en: '2026-11-01T10:00:00Z' }, ['codigo_repuesto']);
+      filas = [repNuevo, repAntiguo];
+
+      const adriana = { id: 'u-adriana', nombre: 'Adriana' };
+      const res1 = await service.tomarSiguienteReporteDeCola(adriana, tBase);
+
+      expect(res1.status).toBe('asignado');
+      expect(res1.numero_reporte).toBe('000301');
+      expect(repAntiguo.reservado_por).toBe('Adriana');
+      expect(repAntiguo.reservado_por_id).toBe('u-adriana');
+
+      // Si Adriana vuelve a pulsar "Siguiente reporte" sin haber cerrado el 000301, recibe el mismo (1 reserva por revisor)
+      const res2 = await service.tomarSiguienteReporteDeCola(adriana, tBase + 60_000);
+      expect(res2.status).toBe('reserva_existente');
+      expect(res2.numero_reporte).toBe('000301');
+    });
+
+    it('dos revisores que pulsan "Siguiente reporte" reciben reportes distintos', async () => {
+      const rep1 = fila({ id: 'rep-1', numero_talonario: '000301', creado_en: '2026-11-01T10:00:00Z' }, ['codigo_repuesto']);
+      const rep2 = fila({ id: 'rep-2', numero_talonario: '000302', creado_en: '2026-11-02T10:00:00Z' }, ['codigo_repuesto']);
+      filas = [rep1, rep2];
+
+      const rAdriana = await service.tomarSiguienteReporteDeCola({ id: 'u-adriana', nombre: 'Adriana' }, tBase);
+      const rFabian = await service.tomarSiguienteReporteDeCola({ id: 'u-fabian', nombre: 'Fabián' }, tBase);
+
+      expect(rAdriana.numero_reporte).toBe('000301');
+      expect(rFabian.numero_reporte).toBe('000302');
+      expect(rAdriana.numero_reporte).not.toBe(rFabian.numero_reporte);
+    });
+
+    it('una reserva que pasa 4 horas sin cerrarse vence automáticamente y vuelve a la cola', async () => {
+      const haceCincoHoras = new Date(tBase - 5 * 60 * 60 * 1000).toISOString();
+      const repVencido = fila(
+        {
+          id: 'rep-vencido',
+          numero_talonario: '000301',
+          creado_en: '2026-11-01T10:00:00Z',
+          reservado_por_id: 'u-adriana',
+          reservado_por: 'Adriana',
+          reservado_en: haceCincoHoras,
+        },
+        ['codigo_repuesto'],
+      );
+      filas = [repVencido];
+
+      const rJean = await service.tomarSiguienteReporteDeCola({ id: 'u-jean', nombre: 'Jean' }, tBase);
+      expect(rJean.status).toBe('asignado');
+      expect(rJean.numero_reporte).toBe('000301');
+      expect(repVencido.reservado_por).toBe('Jean');
+    });
+
+    it('impide que otro revisor edite o libere un reporte reservado activamente, pero permite al administrador liberarlo', async () => {
+      const ahoraIso = new Date(tBase).toISOString();
+      const repReservado = fila(
+        {
+          id: 'rep-res',
+          numero_talonario: '000301',
+          reservado_por_id: 'u-adriana',
+          reservado_por: 'Adriana',
+          reservado_en: ahoraIso,
+        },
+        ['codigo_repuesto'],
+      );
+      filas = [repReservado];
+
+      // Otro revisor (Darwin) no puede editar un campo del reporte reservado por Adriana
+      await expect(
+        service.revisarCampo(
+          '000301',
+          'codigo_repuesto',
+          { tipo: 'corregir', actor: 'Darwin', valor: 'X-1' },
+          { id: 'u-darwin', nombre: 'Darwin', rol: 'revisor', permisos: ['editar_campos'] },
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      // Otro revisor (Darwin) tampoco puede liberar la reserva de Adriana
+      await expect(
+        service.liberarReporte(
+          '000301',
+          { id: 'u-darwin', nombre: 'Darwin', rol: 'revisor', permisos: ['usar_cola'] },
+          tBase,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      // El administrador (Wilber) sí puede liberarlo manualmente
+      const lib = await service.liberarReporte(
+        '000301',
+        { id: 'u-wilber', nombre: 'Wilber Peralta', rol: 'administrador', permisos: ['gestionar_usuarios'] },
+        tBase,
+      );
+      expect(lib.status).toBe('liberado');
+      expect(repReservado.reservado_por).toBeNull();
+    });
+
+    it('el ingestor solo ve sus propias cargas al listar reportes (T02)', async () => {
+      const deDavid = fila({
+        id: 'rep-david',
+        numero_talonario: '000401',
+        escaneo: { id: 'e1', ruta_original: 'a.pdf', paginas: 1, enviado_por: 'David', estado: 'procesado', creado_en: '2026-11-18T10:00:00Z' },
+      });
+      const deValentino = fila({
+        id: 'rep-val',
+        numero_talonario: '000402',
+        escaneo: { id: 'e2', ruta_original: 'b.pdf', paginas: 1, enviado_por: 'Valentino', estado: 'procesado', creado_en: '2026-11-18T10:00:00Z' },
+      });
+      filas = [deDavid, deValentino];
+
+      const listaDavid = await service.listar(100, {
+        id: 'u-david',
+        nombre: 'David',
+        rol: 'ingestor',
+        permisos: ['ver_reportes', 'subir_escaneos'],
+      });
+      expect(listaDavid).toHaveLength(1);
+      expect(listaDavid[0].numero_reporte).toBe('000401');
     });
   });
 });

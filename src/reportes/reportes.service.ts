@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -9,6 +10,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { readFile } from 'node:fs/promises';
+import { esRolAdmin, normalizarRol } from '../auth/permisos';
 import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
@@ -33,6 +35,7 @@ import {
 import {
   CampoGuardado,
   CampoContrato,
+  DURACION_RESERVA_MS,
   FilaReporte,
   RevisionCampo,
   SugerenciaVinculo,
@@ -42,8 +45,22 @@ import {
   construirCampos,
   derivarEstado,
   numeroVisible,
+  reservaActiva,
+  reservaDeFila,
   valorVigente,
 } from './reportes.mapper';
+import {
+  TableroService,
+  TipoAccionEvento,
+  calcularCoincidenciaDobleRevision,
+} from './tablero.service';
+
+const PROBABILIDAD_DOBLE_REVISION = 0.05;
+
+function esErrorColumnaFaltante(error: { code?: string; message?: string } | null | undefined): boolean {
+  if (!error) return false;
+  return /column|columna|schema cache|pgrst204|42703/i.test(`${error.code ?? ''} ${error.message ?? ''}`);
+}
 
 const BUCKET = 'escaneos-originales';
 // Las imágenes se piden a Storage con un enlace firmado y temporal: el bucket es privado porque son datos de clientes.
@@ -56,6 +73,8 @@ const SELECCION =
 @Injectable()
 export class ReportesService {
   private readonly logger = new Logger(ReportesService.name);
+  /** Por defecto en NestJS aplica 5% aleatorio; en pruebas unitarias sin TableroService evita azar. */
+  private selectorDobleRevision: () => number = () => (this.tablero ? Math.random() : 1);
 
   constructor(
     private readonly supabase: SupabaseService,
@@ -63,13 +82,22 @@ export class ReportesService {
     @Optional() private readonly eventos?: EventosGateway,
     // Envío del histórico a RP-TECH (docs/contrato-historico.md)
     @Optional() private readonly rptech?: RptechService,
+    // Registro inmutable de eventos, métricas y doble revisión (Sprint 4 Entrega 2)
+    @Optional() private readonly tablero?: TableroService,
   ) { }
+
+  configurarSelectorDobleRevision(selector: () => number): void {
+    this.selectorDobleRevision = selector;
+  }
 
   private get client() {
     return this.supabase.getClient();
   }
 
-  async listar(limite = 1000) {
+  async listar(
+    limite = 1000,
+    usuario?: { id?: string; nombre?: string; email?: string; rol?: string; roles?: string[]; permisos?: string[] },
+  ) {
     const { data, error } = await this.client
       .from('reportes')
       .select(SELECCION)
@@ -81,8 +109,342 @@ export class ReportesService {
       this.logger.error(`No se pudieron listar los reportes: ${error.message}`);
       throw new InternalServerErrorException('No se pudieron cargar los reportes.');
     }
+
+    let filas = (data as FilaReporte[]) ?? [];
+
+    // SIREP-S4-T02: Si el usuario es únicamente ingestor (sube PDF y no es revisor ni administrador),
+    // solo ve el estado de lo que él subió.
+    if (
+      usuario &&
+      !esRolAdmin(usuario.rol, usuario.roles) &&
+      normalizarRol(usuario.rol) === 'ingestor' &&
+      !usuario.permisos?.includes('editar_campos')
+    ) {
+      const nombreNorm = (usuario.nombre || '').trim().toLowerCase();
+      const userNorm = (usuario.email || '').replace(/@.*$/, '').trim().toLowerCase();
+      filas = filas.filter((f) => {
+        const env = (f.escaneo?.enviado_por || '').trim().toLowerCase();
+        if (!env) return false;
+        return env === nombreNorm || (userNorm !== '' && env === userNorm);
+      });
+    }
+
     // En la lista no se firman enlaces de imagen: el visor los pide al abrir un reporte.
-    return (data as FilaReporte[]).map((fila) => aReporteContrato(fila));
+    return filas.map((fila) => aReporteContrato(fila));
+  }
+
+  private esMismoUsuario(
+    nombreA: string | null | undefined,
+    idA: string | null | undefined,
+    usuario?: { id?: string; nombre?: string },
+  ): boolean {
+    if (!usuario) return false;
+    if (idA && usuario.id) {
+      return idA === usuario.id;
+    }
+    const prop = (nombreA || '').trim().toLowerCase();
+    const nom = (usuario.nombre || '').trim().toLowerCase();
+    return Boolean(prop && nom && prop === nom);
+  }
+
+  /**
+   * SIREP-S4-T03: Verifica si una reserva activa pertenece al usuario autenticado.
+   */
+  private esDuenoDeReserva(
+    fila: FilaReporte,
+    usuario?: { id?: string; nombre?: string; rol?: string; roles?: string[]; permisos?: string[] },
+  ): boolean {
+    if (!usuario) return true;
+    const resv = reservaDeFila(fila);
+    return this.esMismoUsuario(resv.reservado_por, resv.reservado_por_id, usuario);
+  }
+
+  private validarAccesoReserva(
+    fila: FilaReporte,
+    numero: string,
+    usuario?: { id?: string; nombre?: string; rol?: string; roles?: string[]; permisos?: string[] },
+    ahoraMs = Date.now(),
+  ): void {
+    if (!usuario) return;
+    if (esRolAdmin(usuario.rol, usuario.roles) || usuario.permisos?.includes('gestionar_usuarios')) {
+      return;
+    }
+    if (reservaActiva(fila, ahoraMs) && !this.esDuenoDeReserva(fila, usuario)) {
+      const resv = reservaDeFila(fila);
+      throw new ConflictException(
+        `El reporte N° ${numero} está reservado por ${resv.reservado_por}. Solo quien lo reservó o el administrador puede modificarlo.`,
+      );
+    }
+  }
+
+  private async actualizarReporteConFallback(
+    fila: FilaReporte,
+    cambios: Record<string, unknown>,
+    opts?: {
+      actualizadoEn?: string;
+      reservar?: { reservado_por_id: string | null; reservado_por: string | null; reservado_en: string | null } | null;
+    },
+  ): Promise<{ actualizadas: Array<{ id: string }> | null; error: any }> {
+    const ejecutar = async (parche: Record<string, unknown>) => {
+      let q = this.client.from('reportes').update(parche).eq('id', fila.id);
+      if (opts?.actualizadoEn !== undefined) {
+        q = q.eq('actualizado_en', opts.actualizadoEn);
+      }
+      const res = await q.select('id');
+      return { actualizadas: (res.data as Array<{ id: string }> | null) ?? null, error: res.error };
+    };
+
+    const res = await ejecutar(cambios);
+    if (!res.error || !esErrorColumnaFaltante(res.error)) {
+      return res;
+    }
+
+    const {
+      reservado_por_id: _rId,
+      reservado_por: _rNom,
+      reservado_en: _rEn,
+      doble_revision_estado: _dEst,
+      doble_revision_por: _dPor,
+      doble_revision_coincidencia: _dCoin,
+      ...resto
+    } = cambios;
+
+    const parcheFallback: Record<string, unknown> = { ...resto };
+    if (opts && 'reservar' in opts) {
+      const baseOriginal = { ...((cambios.datos_originales as Record<string, any>) ?? fila.datos_originales ?? {}) };
+      if (opts.reservar) {
+        baseOriginal.__reserva = opts.reservar;
+      } else {
+        delete baseOriginal.__reserva;
+      }
+      parcheFallback.datos_originales = baseOriginal;
+    }
+
+    return ejecutar(parcheFallback);
+  }
+
+  /**
+   * SIREP-S4-T03: Devuelve la reserva activa del revisor autenticado (si existe y no venció las 4 horas).
+   */
+  async obtenerMiReserva(
+    usuario: { id: string; nombre: string },
+    ahoraMs = Date.now(),
+  ): Promise<{ reporte: any | null }> {
+    const { data, error } = await this.client
+      .from('reportes')
+      .select(SELECCION)
+      .eq('empresa_id', EMPRESA_POR_DEFECTO)
+      .order('creado_en', { ascending: true })
+      .limit(1000);
+
+    if (error) {
+      throw new InternalServerErrorException('No se pudo consultar la reserva actual.');
+    }
+
+    const filas = (Array.isArray(data) ? data : []) as FilaReporte[];
+    const mia = filas.find((f) => reservaActiva(f, ahoraMs) && this.esDuenoDeReserva(f, usuario));
+    if (!mia) return { reporte: null };
+    return { reporte: await this.obtener(numeroVisible(mia)) };
+  }
+
+  /**
+   * SIREP-S4-T03: Cola libre con reserva ("Siguiente reporte").
+   * - Si el revisor ya tiene una reserva activa (< 4 horas y no cerrada), devuelve esa misma (1 sola reserva por revisor).
+   * - Si una reserva lleva >= 4 horas sin cerrarse, se considera vencida y vuelve a la cola.
+   * - Entrega el reporte pendiente más antiguo y lo reserva atómicamente a nombre del revisor.
+   */
+  async tomarSiguienteReporteDeCola(
+    usuario: { id: string; nombre: string },
+    ahoraMs = Date.now(),
+  ): Promise<{
+    status: 'asignado' | 'reserva_existente' | 'cola_vacia';
+    numero_reporte: string | null;
+    mensaje: string;
+    reporte: any | null;
+  }> {
+    const nombreRevisor = (usuario?.nombre || '').trim() || 'Revisor';
+    const { data, error } = await this.client
+      .from('reportes')
+      .select(SELECCION)
+      .eq('empresa_id', EMPRESA_POR_DEFECTO)
+      .order('creado_en', { ascending: true })
+      .limit(1000);
+
+    if (error) {
+      this.logger.error(`No se pudo consultar la cola de reportes: ${error.message}`);
+      throw new InternalServerErrorException('No se pudo consultar la cola de revisión.');
+    }
+
+    const filas = (Array.isArray(data) ? data : []) as FilaReporte[];
+
+    // 1. Verificar si el revisor ya tiene una reserva activa (regla: una sola reserva a la vez).
+    const reservaPropia = filas.find((f) => {
+      if (!reservaActiva(f, ahoraMs) || !this.esDuenoDeReserva(f, usuario)) return false;
+      const campos = construirCampos(f.campos_extraidos);
+      return campos.some((c) => c.estado_revision === 'pendiente');
+    });
+
+    if (reservaPropia) {
+      const numero = numeroVisible(reservaPropia);
+      return {
+        status: 'reserva_existente',
+        numero_reporte: numero,
+        mensaje: `Ya tienes reservado el reporte N° ${numero}. Termínalo o libéralo antes de tomar otro.`,
+        reporte: await this.obtener(numero),
+      };
+    }
+
+    // 2. Ordenar por antigüedad (creado_en ASC) y filtrar reportes con campos pendientes y sin reserva vigente.
+    const candidatos = [...filas]
+      .sort((a, b) => Date.parse(a.creado_en) - Date.parse(b.creado_en))
+      .filter((f) => {
+        if (f.bloqueado || f.estado_reporte === 'aprobado_rptech' || f.estado_reporte === 'cerrado') {
+          return false;
+        }
+        if (reservaActiva(f, ahoraMs)) {
+          return false;
+        }
+        // SIREP-S4-T08: El segundo revisor de una doble revisión debe ser distinto al primero.
+        const dobleRev = f.datos_originales?.__doble_revision as
+          | { estado?: string; primer_revisor?: string | null; primer_revisor_id?: string | null }
+          | undefined;
+        if (
+          dobleRev?.estado === 'pendiente' &&
+          this.esMismoUsuario(dobleRev.primer_revisor, dobleRev.primer_revisor_id, usuario)
+        ) {
+          return false;
+        }
+        const campos = construirCampos(f.campos_extraidos);
+        return campos.some((c) => c.estado_revision === 'pendiente');
+      });
+
+    const ahoraIso = new Date(ahoraMs).toISOString();
+
+    for (const candidato of candidatos) {
+      const datosReserva = {
+        reservado_por_id: usuario.id || null,
+        reservado_por: nombreRevisor,
+        reservado_en: ahoraIso,
+      };
+      const { actualizadas, error: errUpd } = await this.actualizarReporteConFallback(
+        candidato,
+        datosReserva,
+        { actualizadoEn: candidato.actualizado_en, reservar: datosReserva },
+      );
+
+      if (errUpd) {
+        this.logger.warn(`Fallo reservando reporte ${candidato.id}: ${errUpd.message}`);
+        continue;
+      }
+
+      // Si otro revisor lo reservó en el mismo instante (actualizado_en cambió), probamos con el siguiente más antiguo.
+      if (!actualizadas || actualizadas.length === 0) {
+        continue;
+      }
+
+      candidato.reservado_por_id = usuario.id || null;
+      candidato.reservado_por = nombreRevisor;
+      candidato.reservado_en = ahoraIso;
+
+      const numero = numeroVisible(candidato);
+      await this.tablero?.registrarEvento({
+        usuario_id: usuario.id || null,
+        usuario: nombreRevisor,
+        reporte: numero,
+        tipo_accion: 'tomar',
+        creado_en: ahoraIso,
+      });
+      this.eventos?.emitirCambio('actualizado', numero);
+
+      return {
+        status: 'asignado',
+        numero_reporte: numero,
+        mensaje: `Reporte N° ${numero} reservado a nombre de ${nombreRevisor} por 4 horas.`,
+        reporte: await this.obtener(numero),
+      };
+    }
+
+    return {
+      status: 'cola_vacia',
+      numero_reporte: null,
+      mensaje: 'No hay reportes pendientes disponibles en la cola en este momento.',
+      reporte: null,
+    };
+  }
+
+  /**
+   * SIREP-S4-T03: Libera manualmente un reporte reservado para que vuelva a la cola.
+   * Puede hacerlo el administrador (cualquier reporte) o el propio revisor dueño de la reserva.
+   */
+  async liberarReporte(
+    numero: string,
+    usuario: { id?: string; nombre?: string; rol?: string; roles?: string[]; permisos?: string[] },
+    ahoraMs = Date.now(),
+  ): Promise<{
+    status: 'liberado' | 'sin_reserva';
+    numero_reporte: string;
+    mensaje: string;
+    reporte: any;
+  }> {
+    const fila = await this.buscarFila(numero);
+    const esAdmin =
+      esRolAdmin(usuario?.rol, usuario?.roles) || Boolean(usuario?.permisos?.includes('gestionar_usuarios'));
+
+    const resv = reservaDeFila(fila);
+    if (reservaActiva(fila, ahoraMs) && !esAdmin && !this.esDuenoDeReserva(fila, usuario)) {
+      throw new ForbiddenException(
+        `Solo ${resv.reservado_por} o un administrador pueden liberar la reserva del reporte N° ${numero}.`,
+      );
+    }
+
+    if (!resv.reservado_por && !resv.reservado_en && !resv.reservado_por_id) {
+      return {
+        status: 'sin_reserva',
+        numero_reporte: numero,
+        mensaje: `El reporte N° ${numero} no tenía ninguna reserva activa.`,
+        reporte: await this.obtener(numero),
+      };
+    }
+
+    const parcheLimpiar: Record<string, unknown> = {
+      reservado_por_id: null,
+      reservado_por: null,
+      reservado_en: null,
+    };
+    if (fila.datos_originales?.__reserva) {
+      const sinReserva = { ...fila.datos_originales };
+      delete sinReserva.__reserva;
+      parcheLimpiar.datos_originales = sinReserva;
+    }
+
+    const { error } = await this.actualizarReporteConFallback(fila, parcheLimpiar, { reservar: null });
+
+    if (error) {
+      this.logger.error(`No se pudo liberar la reserva de ${numero}: ${error.message}`);
+      throw new InternalServerErrorException('No se pudo liberar la reserva del reporte.');
+    }
+
+    fila.reservado_por_id = null;
+    fila.reservado_por = null;
+    fila.reservado_en = null;
+    if (fila.datos_originales?.__reserva) {
+      delete fila.datos_originales.__reserva;
+    }
+
+    await this.tablero?.registrarEvento({
+      usuario_id: usuario?.id ?? null,
+      usuario: usuario?.nombre || 'Revisor',
+      reporte: numero,
+      tipo_accion: 'liberar',
+      creado_en: new Date(ahoraMs).toISOString(),
+    });
+    this.eventos?.emitirCambio('actualizado', numero);
+    return {
+      status: 'liberado',
+      numero_reporte: numero,
+      mensaje: `El reporte N° ${numero} fue liberado y volvió a la cola.`,
+      reporte: await this.obtener(numero),
+    };
   }
 
   async obtener(numero: string) {
@@ -213,11 +575,13 @@ export class ReportesService {
   async vincularEntidades(
     numero: string,
     vinculos: { cliente_id?: string | null; equipo_id?: string | null; tecnico_perfil_id?: string | null },
+    usuario?: { id?: string; nombre?: string; rol?: string; roles?: string[]; permisos?: string[] },
   ) {
     const fila = await this.buscarFila(numero);
     if (fila.bloqueado || fila.estado_reporte === 'cerrado') {
       throw new ConflictException(`El reporte N° ${numero} está cerrado y bloqueado.`);
     }
+    this.validarAccesoReserva(fila, numero, usuario);
 
     const actualizacion: Record<string, any> = {};
     if (vinculos.cliente_id !== undefined) actualizacion.cliente_id = vinculos.cliente_id || null;
@@ -242,7 +606,154 @@ export class ReportesService {
     return this.obtener(numero);
   }
 
-  async revisarCampo(numero: string, campoId: string, accion: AccionRevisionDto) {
+  private prepararDobleRevisionSiCorresponde(
+    fila: FilaReporte,
+    guardados: Record<string, CampoGuardado>,
+    camposActuales: CampoContrato[],
+    pendientes: string[],
+    valores: Record<string, string | null>,
+    accionTipo: AccionRevisionDto['tipo'],
+    actorRevisor: string,
+    usuarioId: string | undefined,
+    ahora: string,
+  ): {
+    parcheExtra: Record<string, unknown>;
+    estadoEscaneo?: 'procesado';
+    aprobadoParaRptech: boolean;
+    dobleRevisionIniciada: boolean;
+    dobleRevisionCompletada: boolean;
+    datosOriginalesNuevos?: Record<string, any>;
+  } {
+    if (pendientes.length > 0 || accionTipo === 'reabrir') {
+      return {
+        parcheExtra: {},
+        aprobadoParaRptech: false,
+        dobleRevisionIniciada: false,
+        dobleRevisionCompletada: false,
+      };
+    }
+
+    const dobleRevActual = fila.datos_originales?.__doble_revision as any;
+    const originalesSinReserva = { ...(fila.datos_originales ?? {}) };
+    delete originalesSinReserva.__reserva;
+
+    if (dobleRevActual?.estado === 'pendiente') {
+      const coincidencia = calcularCoincidenciaDobleRevision(
+        dobleRevActual.valores_primera_revision ?? {},
+        valores,
+      );
+      const datosOriginalesNuevos = {
+        ...originalesSinReserva,
+        __doble_revision: {
+          ...dobleRevActual,
+          estado: 'completada',
+          segundo_revisor: actorRevisor,
+          segundo_revisor_id: usuarioId ?? null,
+          completado_en: ahora,
+          porcentaje_coincidencia: coincidencia.porcentaje_coincidencia,
+          campos_coincidentes: coincidencia.campos_coincidentes,
+          campos_totales: coincidencia.campos_totales,
+          discrepancias: coincidencia.discrepancias,
+        },
+      };
+      return {
+        parcheExtra: {
+          doble_revision_estado: 'completada',
+          doble_revision_por: actorRevisor,
+          doble_revision_coincidencia: coincidencia.porcentaje_coincidencia,
+          datos_originales: datosOriginalesNuevos,
+        },
+        aprobadoParaRptech: true,
+        dobleRevisionIniciada: false,
+        dobleRevisionCompletada: true,
+        datosOriginalesNuevos,
+      };
+    }
+
+    const veniaPendiente =
+      camposActuales.some((c) => c.estado_revision === 'pendiente') ||
+      fila.estado_reporte === 'pendiente_revision';
+
+    if (!dobleRevActual?.estado && veniaPendiente && this.selectorDobleRevision() < PROBABILIDAD_DOBLE_REVISION) {
+      const guardadosSinRevision: Record<string, CampoGuardado> = {};
+      const revisionesPrimera: Record<string, RevisionCampo> = {};
+
+      for (const [k, campo] of Object.entries(guardados)) {
+        if (campo?.revision) {
+          revisionesPrimera[k] = campo.revision;
+          const { revision: _omit, ...limpio } = campo;
+          guardadosSinRevision[k] = limpio;
+        } else {
+          guardadosSinRevision[k] = campo;
+        }
+      }
+
+      const camposReset = construirCampos(guardadosSinRevision);
+      const pendientesReset = camposReset
+        .filter((c) => c.estado_revision === 'pendiente')
+        .map((c) => c.id);
+
+      if (pendientesReset.length > 0) {
+        const valoresReset = Object.fromEntries(camposReset.map((c) => [c.id, valorVigente(c)]));
+        const datosOriginalesNuevos = {
+          ...originalesSinReserva,
+          __doble_revision: {
+            estado: 'pendiente',
+            primer_revisor: actorRevisor,
+            primer_revisor_id: usuarioId ?? null,
+            elegido_en: ahora,
+            valores_primera_revision: valores,
+            revisiones_primera_revision: revisionesPrimera,
+          },
+        };
+        return {
+          parcheExtra: {
+            campos_extraidos: guardadosSinRevision,
+            campos_dudosos: pendientesReset,
+            estado_reporte: 'pendiente_revision',
+            ...columnasDesdeValores(valoresReset),
+            corregido_por: null,
+            fecha_correccion: null,
+            doble_revision_estado: 'pendiente',
+            datos_originales: datosOriginalesNuevos,
+          },
+          estadoEscaneo: 'procesado',
+          aprobadoParaRptech: false,
+          dobleRevisionIniciada: true,
+          dobleRevisionCompletada: false,
+          datosOriginalesNuevos,
+        };
+      }
+    }
+
+    return {
+      parcheExtra: fila.datos_originales?.__reserva ? { datos_originales: originalesSinReserva } : {},
+      aprobadoParaRptech: true,
+      dobleRevisionIniciada: false,
+      dobleRevisionCompletada: false,
+    };
+  }
+
+  private tipoEventoDeAccion(tipo: AccionRevisionDto['tipo']): TipoAccionEvento | null {
+    switch (tipo) {
+      case 'corregir':
+        return 'corregir';
+      case 'ilegible':
+        return 'marcar_ilegible';
+      case 'confirmar':
+      case 'omitir':
+        return 'confirmar';
+      default:
+        return null;
+    }
+  }
+
+  async revisarCampo(
+    numero: string,
+    campoId: string,
+    accion: AccionRevisionDto,
+    usuario?: { id?: string; nombre?: string; rol?: string; roles?: string[]; permisos?: string[] },
+  ) {
     if (!IDS_CAMPOS_FORMULARIO.includes(campoId)) {
       throw new NotFoundException(`El formulario no tiene el campo "${campoId}".`);
     }
@@ -253,6 +764,19 @@ export class ReportesService {
     if (estaBloqueado && accion.tipo !== 'reabrir') {
       throw new ConflictException(`El reporte histórico N° ${numero} ya está cerrado y bloqueado. Reabre el campo antes de editarlo.`);
     }
+    this.validarAccesoReserva(fila, numero, usuario);
+
+    const dobleRevActual = fila.datos_originales?.__doble_revision as any;
+    if (
+      dobleRevActual?.estado === 'pendiente' &&
+      !esRolAdmin(usuario?.rol, usuario?.roles) &&
+      this.esMismoUsuario(dobleRevActual.primer_revisor, dobleRevActual.primer_revisor_id, usuario)
+    ) {
+      throw new ConflictException(
+        `El reporte N° ${numero} fue seleccionado para doble revisión a ciegas; debe revisarlo un técnico distinto a ${dobleRevActual.primer_revisor}.`,
+      );
+    }
+
     // Un reporte que RP-TECH ya guardó no se reabre: allá entra cerrado y no se modifica,
     // así que una corrección aquí ya no llegaría y las dos bases quedarían distintas.
     if (accion.tipo === 'reabrir' && fila.rptech_id) {
@@ -298,20 +822,39 @@ export class ReportesService {
     // Las columnas consultables reflejan el valor vigente (el corregido), no el que leyó el modelo.
     const valores = Object.fromEntries(camposNuevos.map((c) => [c.id, valorVigente(c)]));
 
-    const { data: actualizadas, error } = await this.client
-      .from('reportes')
-      .update({
-        campos_extraidos: guardados,
-        campos_dudosos: pendientes,
-        estado_reporte: pendientes.length === 0 ? 'aprobado' : 'pendiente_revision',
-        ...(accion.tipo === 'reabrir' ? { bloqueado: false } : {}),
-        ...columnasDesdeValores(valores),
-        ...(accion.tipo === 'corregir' ? { corregido_por: actorRevisor, fecha_correccion: ahora } : {}),
-      })
-      .eq('id', fila.id)
-      // Control de concurrencia: si otra persona guardó en el medio, `actualizado_en` ya cambió y no se pisa su trabajo.
-      .eq('actualizado_en', fila.actualizado_en)
-      .select('id');
+    const cierreInfo = this.prepararDobleRevisionSiCorresponde(
+      fila,
+      guardados,
+      camposActuales,
+      pendientes,
+      valores,
+      accion.tipo,
+      actorRevisor,
+      usuario?.id,
+      ahora,
+    );
+
+    const parcheActualizacion: Record<string, unknown> = {
+      campos_extraidos: guardados,
+      campos_dudosos: pendientes,
+      estado_reporte: pendientes.length === 0 ? 'aprobado' : 'pendiente_revision',
+      ...(accion.tipo === 'reabrir' ? { bloqueado: false } : {}),
+      ...(pendientes.length === 0
+        ? { reservado_por_id: null, reservado_por: null, reservado_en: null }
+        : {}),
+      ...columnasDesdeValores(valores),
+      ...(accion.tipo === 'corregir' ? { corregido_por: actorRevisor, fecha_correccion: ahora } : {}),
+      ...cierreInfo.parcheExtra,
+    };
+
+    const { actualizadas, error } = await this.actualizarReporteConFallback(
+      fila,
+      parcheActualizacion,
+      {
+        actualizadoEn: fila.actualizado_en,
+        ...(pendientes.length === 0 ? { reservar: null } : {}),
+      },
+    );
 
     if (error) {
       this.logger.error(`No se pudo guardar la revisión de ${campoId}: ${error.message}`);
@@ -321,10 +864,39 @@ export class ReportesService {
       throw new ConflictException('El reporte cambió mientras lo revisabas. Recarga e inténtalo de nuevo.');
     }
 
+    const tipoEv = this.tipoEventoDeAccion(accion.tipo);
+    if (tipoEv) {
+      await this.tablero?.registrarEvento({
+        usuario_id: usuario?.id ?? null,
+        usuario: actorRevisor,
+        reporte: numero,
+        campo: campoId,
+        tipo_accion: tipoEv,
+        detalle: accion.tipo === 'omitir' ? { modo: 'omitir' } : {},
+        creado_en: ahora,
+      });
+    }
+
+    if (pendientes.length === 0 && accion.tipo !== 'reabrir') {
+      await this.tablero?.registrarEvento({
+        usuario_id: usuario?.id ?? null,
+        usuario: actorRevisor,
+        reporte: numero,
+        campo: null,
+        tipo_accion: 'cerrar',
+        detalle: {
+          doble_revision_iniciada: cierreInfo.dobleRevisionIniciada,
+          doble_revision_completada: cierreInfo.dobleRevisionCompletada,
+        },
+        creado_en: ahora,
+      });
+    }
+
+    const estadoEscaneoFinal = cierreInfo.estadoEscaneo ?? estado;
     if (fila.escaneo?.id) {
       const { error: errorEscaneo } = await this.client
         .from('escaneos')
-        .update({ estado })
+        .update({ estado: estadoEscaneoFinal })
         .eq('id', fila.escaneo.id);
       if (errorEscaneo) {
         this.logger.warn(`No se pudo sincronizar el estado del escaneo: ${errorEscaneo.message}`);
@@ -335,9 +907,40 @@ export class ReportesService {
       await this.sincronizarDatasetConEdicion(campoId, accion, valorNuevo, base, valores);
     }
 
-    this.eventos?.emitirCambio('actualizado', numero);
+    // SIREP-S4-T10: Envío automático a RP-TECH al aprobar el reporte en la bandeja.
+    if (
+      cierreInfo.aprobadoParaRptech &&
+      fila.origen === 'historico' &&
+      !fila.rptech_id &&
+      this.rptech?.configurado()
+    ) {
+      const filaParaEnvio: FilaReporte = {
+        ...fila,
+        campos_extraidos: guardados,
+        estado_reporte: 'aprobado',
+        ...columnasDesdeValores(valores),
+        ...(cierreInfo.datosOriginalesNuevos ? { datos_originales: cierreInfo.datosOriginalesNuevos } : {}),
+      };
+      try {
+        const resEnvio = await this.rptech.enviar(filaParaEnvio);
+        if (resEnvio.estado === 'clave_invalida') {
+          await this.client
+            .from('reportes')
+            .update({
+              rptech_error: {
+                codigo: 'clave_invalida',
+                detalle: 'RP-TECH rechazó la clave de SIREP. Revisa RPTECH_CLAVE.',
+              },
+              rptech_enviado_en: ahora,
+            })
+            .eq('id', fila.id);
+        }
+      } catch (errEnvio: any) {
+        this.logger.warn(`Error en envío automático a RP-TECH de ${numero}: ${errEnvio?.message}`);
+      }
+    }
 
-    // El envío a RP-TECH es manual (botón "Enviar" de la bandeja o "Enviar completados").
+    this.eventos?.emitirCambio('actualizado', numero);
     return this.obtener(numero);
   }
 

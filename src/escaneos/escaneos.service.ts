@@ -15,6 +15,7 @@ import { resolverTemperaturaConfigurada } from '../ia-extractor/anthropic.provee
 import { construirContextoDesdeReportes, registrarEdicionEnDataset } from '../ia-extractor/normalizacion';
 import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
 import { aTexto, columnasDesdeValores } from '../reportes/reportes.columnas';
+import { TableroService } from '../reportes/tablero.service';
 import { CAMPOS_FORMULARIO } from './campos-formulario';
 import { ubicarCampos } from './ubicacion';
 import { enParalelo, paginasEnParalelo } from './paralelo';
@@ -87,6 +88,7 @@ export interface ProcesarEscaneoInput {
   caption?: string;
   mimetype?: string;
   enviadoPor?: string;
+  enviadoPorId?: string;
   telegramChatId?: number;
   empresaId?: string;
 }
@@ -125,6 +127,7 @@ export class EscaneosService {
     @Optional() private readonly eventos?: EventosGateway,
     // Proveedor elegido en Configuración > Lectura con IA. Opcional: sin él (pruebas) se usa el .env
     @Optional() private readonly iaConfig?: IaConfigService,
+    @Optional() private readonly tablero?: TableroService,
   ) {
     try {
       this.lectorIA = crearLectorDeReportes();
@@ -156,6 +159,58 @@ export class EscaneosService {
   }
 
   async procesarEscaneo(input: ProcesarEscaneoInput): Promise<ResultadoProcesamientoEscaneo> {
+    const actor = input.enviadoPor || 'telegram';
+    const numeroPreliminar =
+      extraerNumeroReporte(input.caption) || extraerNumeroReporte(input.filename) || null;
+    try {
+      const resultado = await this.ejecutarProcesamientoEscaneo(input);
+      await this.tablero?.registrarEvento({
+        usuario_id: input.enviadoPorId ?? null,
+        usuario: actor,
+        reporte:
+          resultado.numeroReporte && resultado.numeroReporte !== 'Sin N° detectado'
+            ? resultado.numeroReporte
+            : null,
+        tipo_accion: 'subir',
+        detalle: {
+          resultado: 'procesado',
+          filename: input.filename,
+          escaneoId: resultado.escaneoId,
+        },
+      });
+      return resultado;
+    } catch (err: any) {
+      if (err instanceof EscaneoDuplicadoError) {
+        await this.tablero?.registrarEvento({
+          usuario_id: input.enviadoPorId ?? null,
+          usuario: actor,
+          reporte: err.datosExtra?.numeroReporte ?? numeroPreliminar,
+          tipo_accion: 'subir',
+          detalle: {
+            resultado: 'duplicado',
+            tipo_duplicado: err.tipoDuplicado,
+            filename: input.filename,
+          },
+        });
+      } else {
+        await this.tablero?.registrarEvento({
+          usuario_id: input.enviadoPorId ?? null,
+          usuario: actor,
+          reporte: numeroPreliminar,
+          tipo_accion: 'subir',
+          detalle: {
+            resultado: 'error',
+            codigo: err?.response?.codigo ?? err?.codigo ?? 'error_subida',
+            mensaje: err?.message ?? 'Error al procesar escaneo',
+            filename: input.filename,
+          },
+        });
+      }
+      throw err;
+    }
+  }
+
+  private async ejecutarProcesamientoEscaneo(input: ProcesarEscaneoInput): Promise<ResultadoProcesamientoEscaneo> {
     const { buffer, filename, caption, enviadoPor, telegramChatId } = input;
     const empresaId = input.empresaId || EMPRESA_POR_DEFECTO;
 
@@ -597,7 +652,10 @@ export class EscaneosService {
     }
   }
 
-  async listarEscaneos(limite = 50) {
+  async listarEscaneos(
+    limite = 50,
+    usuario?: { nombre?: string; email?: string; rol?: string; roles?: string[]; permisos?: string[] },
+  ) {
     const { data, error } = await this.client
       .from('escaneos')
       .select('*')
@@ -605,6 +663,24 @@ export class EscaneosService {
       .limit(limite);
 
     if (error) throw new BadRequestException(error.message);
+    const lista = Array.isArray(data) ? data : [];
+
+    // SIREP-S4-T02: El ingestor solo ve sus propias cargas.
+    if (
+      usuario &&
+      usuario.rol !== 'administrador' &&
+      usuario.rol !== 'admin' &&
+      !usuario.permisos?.includes('editar_campos') &&
+      !usuario.permisos?.includes('gestionar_usuarios')
+    ) {
+      const nombreNorm = (usuario.nombre || '').trim().toLowerCase();
+      const userNorm = (usuario.email || '').replace(/@.*$/, '').trim().toLowerCase();
+      return lista.filter((e: any) => {
+        const env = String(e?.enviado_por || '').trim().toLowerCase();
+        return env === nombreNorm || (userNorm !== '' && env === userNorm);
+      });
+    }
+
     return data;
   }
 
