@@ -8,6 +8,8 @@ export interface UsuarioAutenticado {
   email: string;
   nombre: string;
   rol: string;
+  /** Lista de roles asignados a la persona (SIREP-S4-T01: una persona puede tener más de un rol). */
+  roles?: string[];
   /** Acciones que esta cuenta puede hacer, leídas de la base de datos en cada petición. */
   permisos: string[];
 }
@@ -109,6 +111,7 @@ export class AuthService {
       email: cuenta.usuario.includes('@') ? cuenta.usuario : `${cuenta.usuario}@sirep.local`,
       nombre: cuenta.nombre,
       rol: cuenta.rol,
+      roles: cuenta.roles ?? [cuenta.rol],
       permisos: cuenta.permisos,
     };
     return {
@@ -142,6 +145,7 @@ export class AuthService {
       email: cuenta.usuario.includes('@') ? cuenta.usuario : `${cuenta.usuario}@sirep.local`,
       nombre: cuenta.nombre,
       rol: cuenta.rol,
+      roles: cuenta.roles ?? [cuenta.rol],
       permisos: cuenta.permisos,
     };
   }

@@ -26,7 +26,14 @@ import {
 } from 'class-validator';
 import { ActividadService } from './actividad.service';
 import { AuthGuard } from './auth.guard';
-import { CATALOGO_PERMISOS, ETIQUETAS_ROL, PERMISOS_POR_ROL, ROLES, ROLES_ASIGNABLES, type RolUsuario } from './permisos';
+import {
+  CATALOGO_PERMISOS,
+  ETIQUETAS_ROL,
+  PERMISOS_POR_ROL,
+  ROLES,
+  ROLES_ASIGNABLES_CON_ALIAS,
+  type RolUsuario,
+} from './permisos';
 import { RequierePermiso } from './requiere-permiso.decorator';
 import { UsuariosService } from './usuarios.service';
 
@@ -47,8 +54,17 @@ export class CrearUsuarioDto {
   @MaxLength(100)
   password!: string;
 
-  @IsIn([...ROLES_ASIGNABLES], { message: 'El rol debe ser supervisor u operador.' })
+  @IsIn([...ROLES_ASIGNABLES_CON_ALIAS], { message: 'El rol debe ser administrador, ingestor o revisor.' })
   rol!: RolUsuario;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsIn([...ROLES_ASIGNABLES_CON_ALIAS], {
+    each: true,
+    message: 'Cada rol adicional debe ser administrador, ingestor o revisor.',
+  })
+  roles?: RolUsuario[];
 
   @IsOptional()
   @IsArray()
@@ -71,8 +87,17 @@ export class ActualizarUsuarioDto {
   password?: string;
 
   @IsOptional()
-  @IsIn([...ROLES_ASIGNABLES], { message: 'El rol debe ser supervisor u operador.' })
+  @IsIn([...ROLES_ASIGNABLES_CON_ALIAS], { message: 'El rol debe ser administrador, ingestor o revisor.' })
   rol?: RolUsuario;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsIn([...ROLES_ASIGNABLES_CON_ALIAS], {
+    each: true,
+    message: 'Cada rol adicional debe ser administrador, ingestor o revisor.',
+  })
+  roles?: RolUsuario[];
 
   @IsOptional()
   @IsArray()

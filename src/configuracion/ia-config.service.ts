@@ -153,7 +153,8 @@ export class IaConfigService {
   fetchFn: typeof fetch = (...args) => globalThis.fetch(...args);
 
   puedeCambiar(rol: string | undefined): boolean {
-    return String(rol ?? '').toLowerCase() === 'admin';
+    const r = String(rol ?? '').trim().toLowerCase();
+    return r === 'admin' || r === 'administrador';
   }
 
   private exigirAdmin(rol: string | undefined) {

@@ -101,17 +101,35 @@ describe('SIREP-S3-T04: Login en la bandeja y API protegida', () => {
     const revisarCampoSpy = jest.fn().mockResolvedValue({ ok: true });
     const controller = new ReportesController({ revisarCampo: revisarCampoSpy } as any);
 
+    const usuarioSesion = { id: 'usr-valentino', email: 'valentino@sirep.local', nombre: 'Valentino' };
     await controller.revisarCampo(
       '000214',
       'codigo_repuesto',
       { tipo: 'corregir', valor: 'REP-900', actor: 'ActorFalsoDelBody' },
-      { usuario: { id: 'usr-valentino', email: 'valentino@sirep.local', nombre: 'Valentino' } },
+      { usuario: usuarioSesion },
     );
 
-    expect(revisarCampoSpy).toHaveBeenCalledWith('000214', 'codigo_repuesto', {
-      tipo: 'corregir',
-      valor: 'REP-900',
-      actor: 'Valentino',
+    expect(revisarCampoSpy).toHaveBeenCalledWith(
+      '000214',
+      'codigo_repuesto',
+      {
+        tipo: 'corregir',
+        valor: 'REP-900',
+        actor: 'Valentino',
+      },
+      usuarioSesion,
+    );
+  });
+
+  it('rechaza con 401 un token enviado en la dirección de la página (?token=...) (SIREP-S4-T02)', async () => {
+    const loginRes = await authController.login({
+      usuario: 'valentino',
+      password: 'claveVal123',
     });
+
+    const { ctx } = crearContextoHttp({}, { token: loginRes.access_token });
+    await expect(authGuard.canActivate(ctx)).rejects.toThrow(
+      'El token de sesión no se acepta en la dirección de la página',
+    );
   });
 });

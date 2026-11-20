@@ -24,7 +24,14 @@ export class AuthGuard implements CanActivate {
     const headerToken = req.headers?.['x-auth-token'] as string | undefined;
     const queryToken = req.query?.token as string | undefined;
 
-    const token = headerAuth || headerToken || queryToken;
+    // SIREP-S4-T02: El token ya no se acepta en la dirección de la página (query string ?token=).
+    if (queryToken && !headerAuth && !headerToken) {
+      throw new UnauthorizedException(
+        'El token de sesión no se acepta en la dirección de la página (URL). Envíalo en el encabezado Authorization.',
+      );
+    }
+
+    const token = headerAuth || headerToken;
     if (!token) {
       throw new UnauthorizedException('Sesión requerida. Inicia sesión para acceder a la API de SIREP.');
     }

@@ -68,7 +68,7 @@ export class BotConfigService {
    */
   puedeCambiar(rol: string | undefined, permisos?: readonly string[]): boolean {
     if (permisos) return permisos.includes('configurar_bot');
-    const roles = (this.config.get<string>('BOT_CONFIG_ROLES') ?? 'admin,operador')
+    const roles = (this.config.get<string>('BOT_CONFIG_ROLES') ?? 'admin,administrador,operador,ingestor')
       .split(',')
       .map((r) => r.trim().toLowerCase())
       .filter(Boolean);
