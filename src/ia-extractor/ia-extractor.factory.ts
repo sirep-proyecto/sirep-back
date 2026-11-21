@@ -7,6 +7,7 @@ import {
 import { GeminiConfig, GeminiLector } from './gemini.proveedor';
 import { OpenAIConfig, OpenAILector } from './openai.proveedor';
 import { LectorDeReportes, ProveedorIaError } from './types';
+import { claveDeEntorno } from './lectura-comun';
 
 export interface FactoryOptions {
   proveedor?: string;
@@ -50,7 +51,7 @@ export function crearLectorDeReportes(opciones?: FactoryOptions): LectorDeReport
 
   if (proveedor === 'gemini') {
     const apiKey =
-      opciones?.geminiConfig?.apiKey || process.env.GEMINI_API_KEY || '';
+      opciones?.geminiConfig?.apiKey || claveDeEntorno(process.env.GEMINI_API_KEY);
     const modelo =
       opciones?.geminiConfig?.modelo || modeloGlobal || process.env.GEMINI_MODEL;
     return new GeminiLector({
@@ -66,7 +67,7 @@ export function crearLectorDeReportes(opciones?: FactoryOptions): LectorDeReport
 
   if (proveedor === 'openai') {
     const apiKey =
-      opciones?.openaiConfig?.apiKey || process.env.OPENAI_API_KEY || '';
+      opciones?.openaiConfig?.apiKey || claveDeEntorno(process.env.OPENAI_API_KEY);
     const modelo =
       opciones?.openaiConfig?.modelo || modeloGlobal || process.env.OPENAI_MODEL;
     return new OpenAILector({

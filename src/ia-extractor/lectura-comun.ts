@@ -18,6 +18,25 @@ import { OBSERVACION_EN_BLANCO, casillaMarcada, esCampoEnBlanco } from './normal
 import { resolverPromptConfigurado } from './anthropic.proveedor';
 import { ETIQUETAS_ANCLA } from './etiquetas-ancla';
 
+/**
+ * Clave tomada de una variable de entorno. Si al pegarla en Render se coló otra línea
+ * (por ejemplo "OPENAI_MODEL=gpt-4o-mini"), se usa solo la primera palabra: un valor con
+ * espacios o saltos de línea no se puede mandar como cabecera y el error mostraría la clave.
+ */
+export function claveDeEntorno(valor: string | undefined): string {
+  const primera = String(valor ?? '').trim().split(/\s+/)[0] ?? '';
+  return /^[\x21-\x7e]+$/.test(primera) ? primera : '';
+}
+
+/** Quita de un mensaje de error cualquier clave, para que nunca llegue a la pantalla ni a los registros. */
+export function ocultarClaves(mensaje: string, ...claves: Array<string | null | undefined>): string {
+  let m = String(mensaje ?? '');
+  for (const c of claves) if (c && c.length >= 6) m = m.split(c).join('••••');
+  return m
+    .replace(/Bearer\s+[^\s"']+/gi, 'Bearer ••••')
+    .replace(/\b(sk-[A-Za-z0-9_-]{6,}|AIza[A-Za-z0-9_-]{6,})/g, '••••');
+}
+
 // Sobrecarga o límite de tasa del proveedor: suelen resolverse en segundos.
 // Un 400/401/403/404 (clave o modelo mal puestos) NO se reintenta porque fallaría igual.
 export const ESTADOS_REINTENTABLES = new Set([429, 500, 502, 503, 504]);
@@ -41,13 +60,14 @@ export async function enviarConReintentos(
     try {
       res = await fetchFn(url, init);
     } catch (err: any) {
-      ultimoError = new ProveedorIaError(proveedor, `Error de conexión: ${err?.message ?? err}`);
+      // El mensaje de fetch puede traer la cabecera con la clave ("invalid header value")
+      ultimoError = new ProveedorIaError(proveedor, `Error de conexión: ${ocultarClaves(String(err?.message ?? err))}`);
     }
 
     if (res) {
       if (res.ok) return res;
       const errorBody = await res.text().catch(() => '');
-      ultimoError = new ProveedorIaError(proveedor, `HTTP ${res.status}: ${errorBody}`, res.status);
+      ultimoError = new ProveedorIaError(proveedor, `HTTP ${res.status}: ${ocultarClaves(errorBody)}`, res.status);
       if (!ESTADOS_REINTENTABLES.has(res.status)) throw ultimoError;
     }
 
