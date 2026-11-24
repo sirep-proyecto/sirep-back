@@ -1,5 +1,14 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { CifradorClaves, IaConfigService, finalDeClave, limpiarModelo } from './ia-config.service';
+import {
+  CifradorClaves,
+  IaConfigService,
+  claveDeEntorno,
+  filtrarModelosGemini,
+  filtrarModelosOpenai,
+  finalDeClave,
+  limpiarModelo,
+  ocultarClaves,
+} from './ia-config.service';
 
 /** Supabase en memoria con la única fila de configuracion_ia. */
 function supabaseFalso(opciones: { sinTabla?: boolean } = {}) {
@@ -171,5 +180,81 @@ describe('utilidades de configuración de IA', () => {
     expect(limpiarModelo(' gpt-4.1-mini ')).toBe('gpt-4.1-mini');
     expect(limpiarModelo('')).toBeNull();
     expect(() => limpiarModelo('gpt 4; drop')).toThrow(BadRequestException);
+  });
+});
+
+describe('claves pegadas con otra línea y errores que la muestran', () => {
+  it('de una variable con otra línea pegada usa solo la clave', () => {
+    expect(claveDeEntorno('sk-proj-abc123456789\nOPENAI_MODEL=gpt-4o-mini')).toBe('sk-proj-abc123456789');
+    expect(claveDeEntorno('  AIzaClave123456 ')).toBe('AIzaClave123456');
+    expect(claveDeEntorno(undefined)).toBe('');
+  });
+
+  it('nunca deja una clave en un mensaje de error', () => {
+    const m = 'Headers.append: "Bearer sk-proj-m-CNabcdef123456 OPENAI_MODEL=x" is an invalid header value.';
+    const limpio = ocultarClaves(m);
+    expect(limpio).not.toContain('sk-proj');
+    expect(limpio).toContain('Bearer ••••');
+    expect(ocultarClaves('falló con clave-rara-999999', 'clave-rara-999999')).toBe('falló con ••••');
+    expect(ocultarClaves('x AIzaSyAbcdefgh123 y')).toBe('x •••• y');
+  });
+
+  it('rechaza una clave pegada con salto de línea desde la pantalla', async () => {
+    const ia = new IaConfigService(configFalsa({ AUTH_JWT_SECRET: 's' }), supabaseFalso().servicio);
+    await expect(
+      ia.guardar({ proveedor: 'openai', clave_openai: 'sk-proj-abc123456789\nOPENAI_MODEL=gpt-4o-mini' }, 'admin', 'Ana'),
+    ).rejects.toThrow('saltos de línea');
+  });
+
+  it('usa la clave limpia del entorno al probar', async () => {
+    const ia = new IaConfigService(
+      configFalsa({ AUTH_JWT_SECRET: 's', OPENAI_API_KEY: 'sk-proj-abc123456789\nOPENAI_MODEL=gpt-4o-mini' }),
+      supabaseFalso().servicio,
+    );
+    let cabecera = '';
+    ia.fetchFn = (async (_u: string, init: any) => {
+      cabecera = init.headers.Authorization;
+      return { ok: true, status: 200 } as any;
+    }) as any;
+    expect((await ia.probar({ proveedor: 'openai', modelo: 'gpt-4o-mini' }, 'admin')).ok).toBe(true);
+    expect(cabecera).toBe('Bearer sk-proj-abc123456789');
+  });
+});
+
+describe('modelos disponibles de la clave', () => {
+  it('OpenAI: deja solo los que leen imágenes, sin fecha primero', () => {
+    const data = [
+      'gpt-4o-mini', 'gpt-4o-mini-2024-07-18', 'gpt-4o', 'gpt-4.1-mini', 'gpt-5-mini', 'o4-mini',
+      'gpt-4o-audio-preview', 'gpt-4o-realtime-preview', 'gpt-4o-mini-tts', 'gpt-4o-transcribe',
+      'text-embedding-3-small', 'dall-e-3', 'whisper-1', 'gpt-3.5-turbo', 'omni-moderation-latest', 'gpt-image-1',
+    ].map((id) => ({ id }));
+    expect(filtrarModelosOpenai(data)).toEqual([
+      'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'gpt-5-mini', 'o4-mini', 'gpt-4o-mini-2024-07-18',
+    ]);
+    expect(filtrarModelosOpenai(undefined)).toEqual([]);
+  });
+
+  it('Gemini: solo los que generan contenido, sin embeddings ni voz', () => {
+    const models = [
+      { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-3.8-flash', supportedGenerationMethods: ['generateContent', 'countTokens'] },
+      { name: 'models/gemini-embedding-001', supportedGenerationMethods: ['embedContent'] },
+      { name: 'models/gemini-2.5-flash-preview-tts', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemma-3-27b-it', supportedGenerationMethods: ['generateContent'] },
+    ];
+    expect(filtrarModelosGemini(models)).toEqual(['gemini-3.8-flash', 'gemini-2.5-flash']);
+  });
+
+  it('consulta la lista con la clave y avisa si la clave no sirve', async () => {
+    const ia = new IaConfigService(configFalsa({ AUTH_JWT_SECRET: 's' }), supabaseFalso().servicio);
+    ia.fetchFn = (async (url: string) =>
+      url.includes('openai')
+        ? ({ ok: true, status: 200, json: async () => ({ data: [{ id: 'gpt-4o-mini' }, { id: 'whisper-1' }] }) } as any)
+        : ({ ok: false, status: 400 } as any)) as any;
+    const r = await ia.listarModelos({ proveedor: 'openai', clave: 'sk-proj-abc123456789' }, 'admin');
+    expect(r).toEqual(expect.objectContaining({ ok: true, modelos: ['gpt-4o-mini'] }));
+    const g = await ia.listarModelos({ proveedor: 'gemini', clave: 'AIzaClave123456' }, 'admin');
+    expect(g).toEqual(expect.objectContaining({ ok: false, mensaje: 'La API key de Gemini no es válida.' }));
+    await expect(ia.listarModelos({ proveedor: 'openai' }, 'supervisor')).rejects.toThrow();
   });
 });
