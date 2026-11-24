@@ -11,6 +11,8 @@ import { SupabaseService } from '../common/supabase.service';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
 import { IaConfigService } from '../configuracion/ia-config.service';
+import { ClaveIaUsuarioService, esFalloDeClave } from '../configuracion/clave-usuario.service';
+import { ocultarClaves } from '../ia-extractor/lectura-comun';
 import { resolverTemperaturaConfigurada } from '../ia-extractor/anthropic.proveedor';
 import { construirContextoDesdeReportes, registrarEdicionEnDataset } from '../ia-extractor/normalizacion';
 import { CampoEsperado, ContextoAprendizaje, LectorDeReportes, ResultadoLectura } from '../ia-extractor/types';
@@ -110,6 +112,8 @@ export interface ResultadoProcesamientoEscaneo {
     proveedor: string;
     modelo: string;
   };
+  /** Con qué clave se leyó: la personal de quien subió, la de la empresa, o la de la empresa porque la personal falló. */
+  claveIa?: { origen: 'personal' | 'empresa' | 'respaldo_empresa'; aviso: string | null };
 }
 
 @Injectable()
@@ -128,6 +132,8 @@ export class EscaneosService {
     // Proveedor elegido en Configuración > Lectura con IA. Opcional: sin él (pruebas) se usa el .env
     @Optional() private readonly iaConfig?: IaConfigService,
     @Optional() private readonly tablero?: TableroService,
+    // Clave de Gemini propia de quien sube el reporte (Configuración > Mi clave de Gemini)
+    @Optional() private readonly clavesUsuario?: ClaveIaUsuarioService,
   ) {
     try {
       this.lectorIA = crearLectorDeReportes();
@@ -245,8 +251,31 @@ export class EscaneosService {
       await this.verificarNumeroNoRegistrado(empresaId, numeroReporte);
     }
 
-    // 3. Lector de IA listo antes de guardar nada: si falta la clave no se sube basura a Storage
-    const lector = await this.obtenerLector();
+    // 3. Lector de IA listo antes de guardar nada: si falta la clave no se sube basura a Storage.
+    // Primero la clave personal de quien sube (cada clave tiene su propio cupo por minuto);
+    // si no tiene, la de la empresa. Con lector fijo (pruebas) no se usan claves personales.
+    const personal = this.lectorFijo ? null : ((await this.clavesUsuario?.lectorPara(input.enviadoPorId)) ?? null);
+    let lector = personal?.lector ?? (await this.obtenerLector());
+    // 'personal' | 'empresa' | 'respaldo_empresa' (la personal falló y se usó la de la empresa)
+    let origenClave: 'personal' | 'empresa' | 'respaldo_empresa' = personal ? 'personal' : 'empresa';
+    let avisoClave: string | null = null;
+    // Si la clave personal falla en una página, todas las que siguen usan la de la empresa.
+    // Una sola promesa: si dos páginas fallan a la vez, se cambia una vez.
+    let cambioAEmpresa: Promise<LectorDeReportes> | null = null;
+    const pasarAEmpresa = (err: any): Promise<LectorDeReportes> => {
+      cambioAEmpresa ??= (async () => {
+        const motivo = ocultarClaves(String(err?.message ?? err), '').slice(0, 300);
+        this.logger.warn(`Clave personal de ${personal!.usuarioId} falló; se usa la de la empresa: ${motivo}`);
+        void this.clavesUsuario?.registrarError(personal!.usuarioId, motivo);
+        origenClave = 'respaldo_empresa';
+        avisoClave = Number(err?.codigoHttp) === 429
+          ? 'Tu clave de Gemini llegó a su límite de uso; este reporte se leyó con la clave de la empresa.'
+          : 'Tu clave de Gemini no funcionó; este reporte se leyó con la clave de la empresa. Revísala en Configuración.';
+        lector = await this.obtenerLector();
+        return lector;
+      })();
+      return cambioAEmpresa;
+    };
 
     // 4. Una imagen por página. Se hace antes de subir para rechazar PDF dañados o demasiado largos sin dejar rastro.
     const esPdf = esPDF(buffer);
@@ -307,14 +336,21 @@ export class EscaneosService {
         paginasEnParalelo(),
         async (pagina, indice) => {
           const copiaIA = await optimizarParaIA(pagina);
+          const leerCon = (l: LectorDeReportes) =>
+            l.leer(copiaIA.buffer, copiaIA.mimetype, this.camposFormulario, temperaturaConfigurada, contexto);
           try {
-            const lecturaPagina = await lector.leer(
-              copiaIA.buffer,
-              copiaIA.mimetype,
-              this.camposFormulario,
-              temperaturaConfigurada,
-              contexto,
-            );
+            let lecturaPagina: ResultadoLectura;
+            const usado = lector;
+            try {
+              lecturaPagina = await leerCon(usado);
+            } catch (err: any) {
+              // Falló la clave personal (inválida o sin cupo): esta página se reintenta con la de la empresa
+              if (personal && usado === personal.lector && esFalloDeClave(err)) {
+                lecturaPagina = await leerCon(await pasarAEmpresa(err));
+              } else {
+                throw err;
+              }
+            }
             // La caja del modelo es relativa a la imagen de ESTA página: se anota cuál es
             for (const campo of lecturaPagina.campos) {
               if (campo.caja) campo.caja.pagina = indice + 1;
@@ -327,6 +363,7 @@ export class EscaneosService {
         },
       );
       const lectura = fusionarLecturas(lecturas);
+      if (personal && origenClave === 'personal') void this.clavesUsuario?.registrarUso(personal.usuarioId);
 
       // 6b. Ubicar cada campo en ESTE escaneo con las etiquetas impresas que encontró la IA.
       // Se usa la PRIMERA página (en orden) cuyo ajuste es fiable: normalmente el anverso.
@@ -393,6 +430,12 @@ export class EscaneosService {
             uso: lectura.uso,
             salida_cruda: lectura.salidaCruda,
             filename,
+            // Con qué clave se leyó (para saber a qué cuenta de Google se cobró). Nunca la clave.
+            clave_ia: {
+              origen: origenClave,
+              usuario_id: personal?.usuarioId ?? null,
+              final: origenClave === 'empresa' ? null : (personal?.final ?? null),
+            },
           },
         })
         .select('id')
@@ -472,6 +515,7 @@ export class EscaneosService {
         huella,
         rutasPaginas,
         metricasIA: lectura.uso,
+        claveIa: { origen: origenClave, aviso: avisoClave },
       };
     } catch (err) {
       await this.limpiarStorage(subidos);

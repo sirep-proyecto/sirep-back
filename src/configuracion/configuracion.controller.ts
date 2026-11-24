@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ActividadInterceptor, RegistrarActividad } from '../auth/actividad.interceptor';
 import { AuthGuard } from '../auth/auth.guard';
 import { BotConfigService } from './bot-config.service';
+import { CambioMiClave, ClaveIaUsuarioService } from './clave-usuario.service';
 import { CambioIa, IaConfigService } from './ia-config.service';
 
 const actorDe = (req: any) => req?.usuario?.nombre || req?.usuario?.email || 'desconocido';
@@ -16,6 +17,7 @@ export class ConfiguracionController {
   constructor(
     private readonly bot: BotConfigService,
     private readonly ia: IaConfigService,
+    private readonly claves: ClaveIaUsuarioService,
   ) {}
 
   /** Estado del bot: a qué dirección le manda Telegram los mensajes, cola y último error. */
@@ -63,6 +65,55 @@ export class ConfiguracionController {
   @Post('ia/probar')
   probarIa(@Body() body: { proveedor?: unknown; modelo?: unknown; clave?: unknown }, @Req() req: any) {
     return this.ia.probar(body ?? {}, req?.usuario?.rol);
+  }
+
+  /** Modelos que puede usar la clave (escrita o guardada), consultados al proveedor. Body: { proveedor, clave? } */
+  @Post('ia/modelos')
+  modelosIa(@Body() body: { proveedor?: unknown; clave?: unknown }, @Req() req: any) {
+    return this.ia.listarModelos(body ?? {}, req?.usuario?.rol);
+  }
+
+  // ---------- Clave de Gemini propia de cada cuenta (cualquier rol) ----------
+
+  /** Estado de MI clave: si hay, sus 4 últimos caracteres, modelo, lecturas y último error. Nunca la clave. */
+  @Get('ia/mi-clave')
+  miClave(@Req() req: any) {
+    return this.claves.estado(req?.usuario?.id);
+  }
+
+  /** Guarda o cambia MI clave y/o modelo. Una clave nueva se prueba antes contra Gemini. Body: { clave?, modelo?, activa? } */
+  @RegistrarActividad('ia_mi_clave_guardada', (req) => ({
+    // Nunca se registra la clave: solo si se cambió
+    clave_nueva: Boolean(req.body?.clave),
+    modelo: String(req.body?.modelo ?? ''),
+  }))
+  @Put('ia/mi-clave')
+  guardarMiClave(@Body() body: CambioMiClave, @Req() req: any) {
+    return this.claves.guardar(req?.usuario?.id, body ?? {});
+  }
+
+  @RegistrarActividad('ia_mi_clave_quitada')
+  @Delete('ia/mi-clave')
+  quitarMiClave(@Req() req: any) {
+    return this.claves.quitar(req?.usuario?.id);
+  }
+
+  /** Prueba MI clave (escrita o guardada) sin guardar. Body: { clave?, modelo? } */
+  @Post('ia/mi-clave/probar')
+  probarMiClave(@Body() body: { clave?: unknown; modelo?: unknown }, @Req() req: any) {
+    return this.claves.probar(req?.usuario?.id, body ?? {});
+  }
+
+  /** Modelos de Gemini de MI clave y cuáles tienen cupo gratuito. Body: { clave? } */
+  @Post('ia/mi-clave/modelos')
+  modelosMiClave(@Body() body: { clave?: unknown }, @Req() req: any) {
+    return this.claves.modelos(req?.usuario?.id, body ?? {});
+  }
+
+  /** Solo administrador: quién tiene clave propia y su estado (sin las claves). */
+  @Get('ia/claves-usuarios')
+  clavesUsuarios(@Req() req: any) {
+    return this.claves.listarParaAdmin(req?.usuario?.rol);
   }
 
   @RegistrarActividad('ia_clave_quitada', (req) => ({ proveedor: String(req.params?.proveedor ?? '') }))

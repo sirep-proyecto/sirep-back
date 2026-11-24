@@ -11,6 +11,9 @@ import { SupabaseService } from '../common/supabase.service';
 import { crearLectorDeReportes } from '../ia-extractor/ia-extractor.factory';
 import { LectorDeReportes } from '../ia-extractor/types';
 import { MODELO_OPENAI_POR_DEFECTO } from '../ia-extractor/openai.proveedor';
+import { claveDeEntorno, ocultarClaves } from '../ia-extractor/lectura-comun';
+
+export { claveDeEntorno, ocultarClaves };
 
 /**
  * Proveedor de IA elegido desde la app (Configuración > Lectura con IA).
@@ -27,11 +30,12 @@ import { MODELO_OPENAI_POR_DEFECTO } from '../ia-extractor/openai.proveedor';
 export type ProveedorIa = 'gemini' | 'openai';
 export const PROVEEDORES_IA: readonly ProveedorIa[] = ['gemini', 'openai'];
 
-export const MODELO_GEMINI_POR_DEFECTO = 'gemini-3.8-flash';
+// Modelo por defecto: liviano, rápido y con cupo gratuito amplio.
+export const MODELO_GEMINI_POR_DEFECTO = 'gemini-3.5-flash-lite';
 
 /** Sugerencias para el selector; se puede escribir cualquier otro modelo. */
 export const MODELOS_SUGERIDOS: Record<ProveedorIa, string[]> = {
-  gemini: ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro'],
+  gemini: ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.5-pro'],
   openai: ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4.1', 'gpt-5-mini'],
 };
 
@@ -106,11 +110,12 @@ function limpiarClave(valor: unknown): string | null {
   if (valor === undefined || valor === null) return null;
   const c = String(valor).trim();
   if (!c) return null;
-  if (c.length < 10 || c.length > 300 || /\s/.test(c)) {
-    throw new BadRequestException('La clave no tiene un formato válido. Cópiala completa, sin espacios.');
+  if (c.length < 10 || c.length > 300 || !/^[\x21-\x7e]+$/.test(c)) {
+    throw new BadRequestException('La clave no tiene un formato válido. Cópiala completa, sin espacios ni saltos de línea.');
   }
   return c;
 }
+
 
 /** Cifrado simétrico con una llave derivada del secreto del servidor. Formato v1:iv:tag:datos (base64). */
 export class CifradorClaves {
@@ -163,7 +168,8 @@ export class IaConfigService {
     }
   }
 
-  private cifrador(): CifradorClaves {
+  /** Público: las claves personales (claves_ia_usuario) se cifran con la misma llave. */
+  cifrador(): CifradorClaves {
     const secreto =
       this.config.get<string>('IA_CLAVES_SECRETO')?.trim() || this.config.get<string>('AUTH_JWT_SECRET')?.trim() || '';
     return new CifradorClaves(secreto);
@@ -179,7 +185,13 @@ export class IaConfigService {
   }
 
   private claveEntorno(p: ProveedorIa): string {
-    return this.env(p === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY');
+    const nombre = p === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
+    const crudo = this.env(nombre);
+    const clave = claveDeEntorno(crudo);
+    if (crudo && clave !== crudo) {
+      this.logger.warn(`${nombre} trae más de un valor (¿se pegó otra línea del .env?); se usa solo la primera palabra.`);
+    }
+    return clave;
   }
 
   private modeloEntorno(p: ProveedorIa): string {
@@ -365,6 +377,14 @@ export class IaConfigService {
     const clave = limpiarClave(datos.clave) || this.claveGuardada(fila, p).clave || this.claveEntorno(p);
     if (!clave) return { ok: false, mensaje: `No hay API key de ${ETIQUETA[p]} para probar.` };
 
+    return this.probarConClave(p, clave, modelo);
+  }
+
+  /**
+   * Comprueba una clave concreta sin gastar (pide los datos del modelo). Sin control de
+   * rol: lo usan la pantalla del administrador y la de "Mi clave de Gemini".
+   */
+  async probarConClave(p: ProveedorIa, clave: string, modelo: string): Promise<{ ok: boolean; mensaje: string }> {
     const url =
       p === 'gemini'
         ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelo)}`
@@ -376,7 +396,10 @@ export class IaConfigService {
     try {
       res = await this.fetchFn(url, { headers, signal: AbortSignal.timeout(15_000) });
     } catch (err: any) {
-      return { ok: false, mensaje: `No se pudo conectar con ${ETIQUETA[p]}: ${err?.message ?? err}` };
+      return {
+        ok: false,
+        mensaje: ocultarClaves(`No se pudo conectar con ${ETIQUETA[p]}: ${err?.message ?? err}`, clave),
+      };
     }
     if (res.ok) return { ok: true, mensaje: `Conexión correcta con ${ETIQUETA[p]} (${modelo}).` };
     if (res.status === 401 || (p === 'gemini' && res.status === 400)) {
@@ -389,4 +412,90 @@ export class IaConfigService {
     }
     return { ok: false, mensaje: `${ETIQUETA[p]} respondió HTTP ${res.status}.` };
   }
+
+  /**
+   * Modelos que la clave puede usar, consultados al proveedor (no gasta saldo).
+   * Solo se devuelven los que sirven para leer una imagen y responder texto:
+   * se quitan los de audio, voz, imágenes, embeddings, moderación, etc.
+   */
+  async listarModelos(
+    datos: { proveedor?: unknown; clave?: unknown },
+    rol: string | undefined,
+  ): Promise<{ ok: boolean; modelos: string[]; mensaje: string }> {
+    this.exigirAdmin(rol);
+    if (!esProveedorIa(datos.proveedor)) throw new BadRequestException('Proveedor inválido');
+    const p = datos.proveedor;
+    const { fila } = await this.leerFila(true);
+    const clave = limpiarClave(datos.clave) || this.claveGuardada(fila, p).clave || this.claveEntorno(p);
+    if (!clave) return { ok: false, modelos: [], mensaje: `Pega primero la API key de ${ETIQUETA[p]}.` };
+
+    return this.modelosConClave(p, clave);
+  }
+
+  /** Modelos de una clave concreta (sin control de rol; ver listarModelos). */
+  async modelosConClave(p: ProveedorIa, clave: string): Promise<{ ok: boolean; modelos: string[]; mensaje: string }> {
+    const url =
+      p === 'gemini'
+        ? 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000'
+        : 'https://api.openai.com/v1/models';
+    const headers: Record<string, string> =
+      p === 'gemini' ? { 'x-goog-api-key': clave } : { Authorization: `Bearer ${clave}` };
+
+    let res: Response;
+    try {
+      res = await this.fetchFn(url, { headers, signal: AbortSignal.timeout(15_000) });
+    } catch (err: any) {
+      return {
+        ok: false,
+        modelos: [],
+        mensaje: ocultarClaves(`No se pudo conectar con ${ETIQUETA[p]}: ${err?.message ?? err}`, clave),
+      };
+    }
+    if (!res.ok) {
+      const mensaje =
+        res.status === 401 || (p === 'gemini' && (res.status === 400 || res.status === 403))
+          ? `La API key de ${ETIQUETA[p]} no es válida.`
+          : res.status === 429
+            ? `${ETIQUETA[p]} rechazó por límite de uso o falta de saldo (429).`
+            : `${ETIQUETA[p]} respondió HTTP ${res.status}.`;
+      return { ok: false, modelos: [], mensaje };
+    }
+    const json: any = await res.json().catch(() => ({}));
+    const modelos = p === 'gemini' ? filtrarModelosGemini(json?.models) : filtrarModelosOpenai(json?.data);
+    return {
+      ok: true,
+      modelos,
+      mensaje: modelos.length
+        ? `${modelos.length} modelos disponibles con esta clave.`
+        : `La clave funciona pero no tiene modelos que lean imágenes.`,
+    };
+  }
+}
+
+// Lo que no sirve para leer el talonario (no ve imágenes o no responde texto)
+const OPENAI_EXCLUIR =
+  /(audio|realtime|transcribe|tts|whisper|dall-e|image|embedding|moderation|search|instruct|codex|computer-use|babbage|davinci|deep-research)/i;
+const OPENAI_INCLUIR = /^(gpt-4o|gpt-4\.1|gpt-4\.5|gpt-5|o1|o3|o4|chatgpt-4o)/i;
+
+export function filtrarModelosOpenai(datos: unknown): string[] {
+  if (!Array.isArray(datos)) return [];
+  const ids = datos
+    .map((m: any) => String(m?.id ?? ''))
+    .filter((id) => id && OPENAI_INCLUIR.test(id) && !OPENAI_EXCLUIR.test(id) && !/^o1-mini/.test(id));
+  // Primero los alias sin fecha (gpt-4o-mini) y después las versiones fechadas
+  const fechado = (id: string) => /-\d{4}-\d{2}-\d{2}$/.test(id);
+  return [...new Set(ids)].sort((a, b) => Number(fechado(a)) - Number(fechado(b)) || a.localeCompare(b));
+}
+
+// No sirven para leer el talonario: voz, imágenes, robótica, transcripción, uso del computador, etc.
+const GEMINI_EXCLUIR =
+  /(embedding|tts|image-generation|-image|live|native-audio|aqa|imagen|veo|learnlm|gemma|robotics|transcribe|computer-use|customtools|nano-banana|omni)/i;
+
+export function filtrarModelosGemini(datos: unknown): string[] {
+  if (!Array.isArray(datos)) return [];
+  const ids = datos
+    .filter((m: any) => Array.isArray(m?.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+    .map((m: any) => String(m?.name ?? '').replace(/^models\//, ''))
+    .filter((id) => id.startsWith('gemini') && !GEMINI_EXCLUIR.test(id));
+  return [...new Set(ids)].sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
 }
