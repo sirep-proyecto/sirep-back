@@ -30,11 +30,12 @@ export { claveDeEntorno, ocultarClaves };
 export type ProveedorIa = 'gemini' | 'openai';
 export const PROVEEDORES_IA: readonly ProveedorIa[] = ['gemini', 'openai'];
 
-export const MODELO_GEMINI_POR_DEFECTO = 'gemini-3.8-flash';
+// Modelo por defecto: liviano, rápido y con cupo gratuito amplio.
+export const MODELO_GEMINI_POR_DEFECTO = 'gemini-3.5-flash-lite';
 
 /** Sugerencias para el selector; se puede escribir cualquier otro modelo. */
 export const MODELOS_SUGERIDOS: Record<ProveedorIa, string[]> = {
-  gemini: ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro'],
+  gemini: ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.5-pro'],
   openai: ['gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4.1', 'gpt-5-mini'],
 };
 
@@ -167,7 +168,8 @@ export class IaConfigService {
     }
   }
 
-  private cifrador(): CifradorClaves {
+  /** Público: las claves personales (claves_ia_usuario) se cifran con la misma llave. */
+  cifrador(): CifradorClaves {
     const secreto =
       this.config.get<string>('IA_CLAVES_SECRETO')?.trim() || this.config.get<string>('AUTH_JWT_SECRET')?.trim() || '';
     return new CifradorClaves(secreto);
@@ -375,6 +377,14 @@ export class IaConfigService {
     const clave = limpiarClave(datos.clave) || this.claveGuardada(fila, p).clave || this.claveEntorno(p);
     if (!clave) return { ok: false, mensaje: `No hay API key de ${ETIQUETA[p]} para probar.` };
 
+    return this.probarConClave(p, clave, modelo);
+  }
+
+  /**
+   * Comprueba una clave concreta sin gastar (pide los datos del modelo). Sin control de
+   * rol: lo usan la pantalla del administrador y la de "Mi clave de Gemini".
+   */
+  async probarConClave(p: ProveedorIa, clave: string, modelo: string): Promise<{ ok: boolean; mensaje: string }> {
     const url =
       p === 'gemini'
         ? `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelo)}`
@@ -419,6 +429,11 @@ export class IaConfigService {
     const clave = limpiarClave(datos.clave) || this.claveGuardada(fila, p).clave || this.claveEntorno(p);
     if (!clave) return { ok: false, modelos: [], mensaje: `Pega primero la API key de ${ETIQUETA[p]}.` };
 
+    return this.modelosConClave(p, clave);
+  }
+
+  /** Modelos de una clave concreta (sin control de rol; ver listarModelos). */
+  async modelosConClave(p: ProveedorIa, clave: string): Promise<{ ok: boolean; modelos: string[]; mensaje: string }> {
     const url =
       p === 'gemini'
         ? 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000'
@@ -472,7 +487,9 @@ export function filtrarModelosOpenai(datos: unknown): string[] {
   return [...new Set(ids)].sort((a, b) => Number(fechado(a)) - Number(fechado(b)) || a.localeCompare(b));
 }
 
-const GEMINI_EXCLUIR = /(embedding|tts|image-generation|-image|live|native-audio|aqa|imagen|veo|learnlm|gemma)/i;
+// No sirven para leer el talonario: voz, imágenes, robótica, transcripción, uso del computador, etc.
+const GEMINI_EXCLUIR =
+  /(embedding|tts|image-generation|-image|live|native-audio|aqa|imagen|veo|learnlm|gemma|robotics|transcribe|computer-use|customtools|nano-banana|omni)/i;
 
 export function filtrarModelosGemini(datos: unknown): string[] {
   if (!Array.isArray(datos)) return [];

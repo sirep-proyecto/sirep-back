@@ -122,6 +122,66 @@ describe('EscaneosService', () => {
     service.setLectorIA(lector);
   });
 
+  describe('clave de Gemini de quien sube el reporte', () => {
+    function conClaves(personal: LectorDeReportes | null) {
+      const empresa: LectorDeReportes = { nombre: 'empresa', modelo: 'm', leer: jest.fn().mockResolvedValue(lecturaBase()) };
+      const iaConfig = { lectorActual: jest.fn().mockResolvedValue(empresa) } as any;
+      const claves = {
+        lectorPara: jest.fn(async (id?: string) => (personal && id === 'u-ana' ? { lector: personal, usuarioId: 'u-ana', final: '1234' } : null)),
+        registrarUso: jest.fn(async () => undefined),
+        registrarError: jest.fn(async () => undefined),
+      } as any;
+      const svc = new EscaneosService(crearSupabase(), undefined, iaConfig, undefined, claves);
+      return { svc, empresa, claves };
+    }
+
+    it('lee con la clave personal y anota el uso', async () => {
+      const personal: LectorDeReportes = { nombre: 'ana', modelo: 'm', leer: jest.fn().mockResolvedValue(lecturaBase()) };
+      const { svc, empresa, claves } = conClaves(personal);
+      const r = await svc.procesarEscaneo({ buffer: png, filename: 'foto.png', enviadoPorId: 'u-ana', enviadoPor: 'Ana' });
+      expect(personal.leer).toHaveBeenCalledTimes(1);
+      expect(empresa.leer).not.toHaveBeenCalled();
+      expect(r.claveIa).toEqual({ origen: 'personal', aviso: null });
+      expect(claves.registrarUso).toHaveBeenCalledWith('u-ana');
+      expect(inserts['escaneos'][0].metadatos.clave_ia).toEqual({ origen: 'personal', usuario_id: 'u-ana', final: '1234' });
+    });
+
+    it('si la clave personal se queda sin cupo (429), reintenta con la de la empresa y avisa', async () => {
+      const { ProveedorIaError } = jest.requireActual('../ia-extractor/types');
+      const personal: LectorDeReportes = {
+        nombre: 'ana',
+        modelo: 'm',
+        leer: jest.fn().mockRejectedValue(new ProveedorIaError('gemini', 'HTTP 429: RESOURCE_EXHAUSTED', 429)),
+      };
+      const { svc, empresa, claves } = conClaves(personal);
+      const r = await svc.procesarEscaneo({ buffer: png, filename: 'foto.png', enviadoPorId: 'u-ana' });
+      expect(empresa.leer).toHaveBeenCalledTimes(1);
+      expect(r.claveIa?.origen).toBe('respaldo_empresa');
+      expect(r.claveIa?.aviso).toContain('límite de uso');
+      expect(claves.registrarError).toHaveBeenCalledWith('u-ana', expect.stringContaining('429'));
+      expect(claves.registrarUso).not.toHaveBeenCalled();
+    });
+
+    it('un fallo que no es de la clave (Gemini saturado, 503) no cambia de clave: falla la lectura', async () => {
+      const { ProveedorIaError } = jest.requireActual('../ia-extractor/types');
+      const personal: LectorDeReportes = {
+        nombre: 'ana',
+        modelo: 'm',
+        leer: jest.fn().mockRejectedValue(new ProveedorIaError('gemini', 'HTTP 503: high demand', 503)),
+      };
+      const { svc, empresa } = conClaves(personal);
+      await expect(svc.procesarEscaneo({ buffer: png, filename: 'foto.png', enviadoPorId: 'u-ana' })).rejects.toBeInstanceOf(LecturaIAError);
+      expect(empresa.leer).not.toHaveBeenCalled();
+    });
+
+    it('sin clave personal usa la de la empresa', async () => {
+      const { svc, empresa } = conClaves(null);
+      const r = await svc.procesarEscaneo({ buffer: png, filename: 'foto.png', enviadoPorId: 'u-luis' });
+      expect(empresa.leer).toHaveBeenCalledTimes(1);
+      expect(r.claveIa).toEqual({ origen: 'empresa', aviso: null });
+    });
+  });
+
   it('rechaza un archivo con la misma huella SHA-256 (archivo_duplicado) sin subir nada', async () => {
     config.huellaExiste = true;
     const buffer = Buffer.from('contenido-del-reporte-845');
