@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { esRolAdmin, normalizarListaRoles, normalizarRol, type RolCanonico } from '../auth/permisos';
 import { SupabaseService } from '../common/supabase.service';
+import { leerPaginado } from '../common/leer-paginado';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
 import { normalizarTexto } from '../ia-extractor/normalizacion';
 import {
@@ -512,16 +513,17 @@ export class TableroService {
   async listarEventos(filtro: { limite?: number; usuarioId?: string; reporte?: string; tipoAccion?: string } = {}): Promise<EventoRevision[]> {
     const limite = Math.min(Math.max(Number(filtro.limite) || 500, 1), 2000);
     try {
-      let consulta = this.db
-        .from('eventos_revision')
-        .select('id, usuario_id, usuario, reporte, campo, tipo_accion, detalle, creado_en')
-        .order('creado_en', { ascending: false })
-        .limit(limite);
-      if (filtro.usuarioId) consulta = consulta.eq('usuario_id', filtro.usuarioId);
-      if (filtro.reporte) consulta = consulta.eq('reporte', filtro.reporte);
-      if (filtro.tipoAccion) consulta = consulta.eq('tipo_accion', filtro.tipoAccion);
+      const crearConsulta = () => {
+        let consulta = this.db
+          .from('eventos_revision')
+          .select('id, usuario_id, usuario, reporte, campo, tipo_accion, detalle, creado_en');
+        if (filtro.usuarioId) consulta = consulta.eq('usuario_id', filtro.usuarioId);
+        if (filtro.reporte) consulta = consulta.eq('reporte', filtro.reporte);
+        if (filtro.tipoAccion) consulta = consulta.eq('tipo_accion', filtro.tipoAccion);
+        return consulta.order('creado_en', { ascending: false }).order('id', { ascending: true });
+      };
 
-      const { data, error } = await consulta;
+      const { data, error } = await leerPaginado<EventoRevision>(crearConsulta, limite);
       if (!error && Array.isArray(data)) {
         return data as EventoRevision[];
       }
@@ -856,20 +858,24 @@ export class TableroService {
   async obtenerTablero(ahoraMs = Date.now()): Promise<TableroAdministrador> {
     const [cuentas, resReportes, resEscaneos, eventosGuardados] = await Promise.all([
       this.cargarUsuarios(),
-      this.db
-        .from('reportes')
-        .select(
-          '*, escaneo:escaneos(id, ruta_original, paginas, enviado_por, telegram_chat_id, estado, creado_en)',
-        )
-        .eq('empresa_id', EMPRESA_POR_DEFECTO)
-        .order('creado_en', { ascending: false })
-        .limit(2000),
-      this.db
-        .from('escaneos')
-        .select('id, numero_reporte, enviado_por, estado, creado_en')
-        .eq('empresa_id', EMPRESA_POR_DEFECTO)
-        .order('creado_en', { ascending: false })
-        .limit(2000),
+      leerPaginado(() =>
+        this.db
+          .from('reportes')
+          .select(
+            '*, escaneo:escaneos(id, ruta_original, paginas, enviado_por, telegram_chat_id, estado, creado_en)',
+          )
+          .eq('empresa_id', EMPRESA_POR_DEFECTO)
+          .order('creado_en', { ascending: false })
+          .order('id', { ascending: true }),
+      ),
+      leerPaginado(() =>
+        this.db
+          .from('escaneos')
+          .select('id, numero_reporte, enviado_por, estado, creado_en')
+          .eq('empresa_id', EMPRESA_POR_DEFECTO)
+          .order('creado_en', { ascending: false })
+          .order('id', { ascending: true }),
+      ),
       this.listarEventos({ limite: 2000 }),
     ]);
 

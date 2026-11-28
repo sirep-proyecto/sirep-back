@@ -267,6 +267,7 @@ describe('Sprint 4 Entrega 2: Eventos inmutables, Sesiones 20 min, Tablero, Dobl
               eq: () => chain,
               order: () => chain,
               limit: () => chain,
+              range: () => chain,
               then: (res: any, rej: any) => {
                 if (tabla === 'usuarios') return Promise.resolve({ data: usuarios, error: null }).then(res, rej);
                 if (tabla === 'reportes') return Promise.resolve({ data: [cerrado, enCola, reservado], error: null }).then(res, rej);
@@ -336,6 +337,7 @@ describe('Sprint 4 Entrega 2: Eventos inmutables, Sesiones 20 min, Tablero, Dobl
               is: () => chain,
               order: () => chain,
               limit: () => chain,
+              range: () => chain,
               update: (p: any) => {
                 updatePayload = p;
                 return chain;
@@ -438,6 +440,7 @@ describe('Sprint 4 Entrega 2: Eventos inmutables, Sesiones 20 min, Tablero, Dobl
               is: () => chain,
               order: () => chain,
               limit: () => chain,
+              range: () => chain,
               update: (p: any) => {
                 updatePayload = p;
                 return chain;
