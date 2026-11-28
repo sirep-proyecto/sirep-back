@@ -62,6 +62,7 @@ describe('ReportesService', () => {
         }),
         order: jest.fn(() => b),
         limit: jest.fn(() => b),
+        range: jest.fn(() => b),
         update: jest.fn((datos: any) => {
           datosUpdate = datos;
           return b;

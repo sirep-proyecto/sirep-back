@@ -13,6 +13,7 @@ import { readFile } from 'node:fs/promises';
 import { esRolAdmin, normalizarRol } from '../auth/permisos';
 import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
+import { leerPaginado } from '../common/leer-paginado';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
 import { EMPRESA_POR_DEFECTO } from '../escaneos/escaneos.service';
@@ -230,12 +231,14 @@ export class ReportesService {
     usuario: { id: string; nombre: string },
     ahoraMs = Date.now(),
   ): Promise<{ reporte: any | null }> {
-    const { data, error } = await this.client
-      .from('reportes')
-      .select(SELECCION)
-      .eq('empresa_id', EMPRESA_POR_DEFECTO)
-      .order('creado_en', { ascending: true })
-      .limit(1000);
+    const { data, error } = await leerPaginado(() =>
+      this.client
+        .from('reportes')
+        .select(SELECCION)
+        .eq('empresa_id', EMPRESA_POR_DEFECTO)
+        .order('creado_en', { ascending: true })
+        .order('id', { ascending: true }),
+    );
 
     if (error) {
       throw new InternalServerErrorException('No se pudo consultar la reserva actual.');
@@ -263,12 +266,14 @@ export class ReportesService {
     reporte: any | null;
   }> {
     const nombreRevisor = (usuario?.nombre || '').trim() || 'Revisor';
-    const { data, error } = await this.client
-      .from('reportes')
-      .select(SELECCION)
-      .eq('empresa_id', EMPRESA_POR_DEFECTO)
-      .order('creado_en', { ascending: true })
-      .limit(1000);
+    const { data, error } = await leerPaginado(() =>
+      this.client
+        .from('reportes')
+        .select(SELECCION)
+        .eq('empresa_id', EMPRESA_POR_DEFECTO)
+        .order('creado_en', { ascending: true })
+        .order('id', { ascending: true }),
+    );
 
     if (error) {
       this.logger.error(`No se pudo consultar la cola de reportes: ${error.message}`);
@@ -1029,12 +1034,14 @@ export class ReportesService {
     porReintentar: string[];
   }> {
     const rptech = this.exigirEnvio();
-    const { data, error } = await this.client
-      .from('reportes')
-      .select(SELECCION)
-      .eq('empresa_id', EMPRESA_POR_DEFECTO)
-      .order('creado_en', { ascending: true })
-      .limit(2000);
+    const { data, error } = await leerPaginado(() =>
+      this.client
+        .from('reportes')
+        .select(SELECCION)
+        .eq('empresa_id', EMPRESA_POR_DEFECTO)
+        .order('creado_en', { ascending: true })
+        .order('id', { ascending: true }),
+    );
 
     if (error) {
       this.logger.error(`No se pudieron cargar los reportes para lote: ${error.message}`);
@@ -1120,11 +1127,13 @@ export class ReportesService {
     }>;
     csv: string;
   }> {
-    const { data, error } = await this.client
-      .from('reportes')
-      .select('campos_extraidos')
-      .eq('empresa_id', EMPRESA_POR_DEFECTO)
-      .limit(5000);
+    const { data, error } = await leerPaginado(() =>
+      this.client
+        .from('reportes')
+        .select('campos_extraidos')
+        .eq('empresa_id', EMPRESA_POR_DEFECTO)
+        .order('id', { ascending: true }),
+    );
 
     if (error) {
       this.logger.error(`No se pudieron calcular métricas por campo: ${error.message}`);
@@ -1200,12 +1209,14 @@ export class ReportesService {
     totalReportes: number;
     columnas: string[];
   }> {
-    const { data, error } = await this.client
-      .from('reportes')
-      .select(SELECCION)
-      .eq('empresa_id', EMPRESA_POR_DEFECTO)
-      .order('creado_en', { ascending: false })
-      .limit(2000);
+    const { data, error } = await leerPaginado(() =>
+      this.client
+        .from('reportes')
+        .select(SELECCION)
+        .eq('empresa_id', EMPRESA_POR_DEFECTO)
+        .order('creado_en', { ascending: false })
+        .order('id', { ascending: true }),
+    );
 
     if (error) {
       this.logger.error(`No se pudieron exportar los reportes: ${error.message}`);
