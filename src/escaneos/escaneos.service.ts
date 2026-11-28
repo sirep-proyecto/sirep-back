@@ -35,6 +35,10 @@ import {
 
 const BUCKET = 'escaneos-originales';
 const COLUMNAS_EXISTENTE = 'id, numero_reporte, creado_en, enviado_por, telegram_chat_id';
+/** Reportes recientes que se leen para el contexto de aprendizaje de la IA. */
+const REPORTES_PARA_CONTEXTO = 100;
+/** Cuánto se reutiliza ese contexto entre subidas. */
+const VIGENCIA_CONTEXTO_MS = 2 * 60 * 1000;
 export const EMPRESA_POR_DEFECTO = '00000000-0000-0000-0000-000000000000';
 
 /** Datos del escaneo que ya existía, para que la página muestre "llegó por Telegram el 10/11". */
@@ -119,6 +123,11 @@ export interface ResultadoProcesamientoEscaneo {
 @Injectable()
 export class EscaneosService {
   private readonly logger = new Logger(EscaneosService.name);
+  private contextoGuardado: {
+    empresaId: string;
+    valor: { contexto: ContextoAprendizaje; totalReportesPrevios: number };
+    venceEn: number;
+  } | null = null;
   private lectorIA: LectorDeReportes | null = null;
   private lectorFijo = false;
 
@@ -561,6 +570,25 @@ export class EscaneosService {
   private async obtenerContextoYConteo(
     empresaId: string,
   ): Promise<{ contexto: ContextoAprendizaje; totalReportesPrevios: number }> {
+    const guardado = this.contextoGuardado;
+    if (guardado && guardado.empresaId === empresaId && Date.now() < guardado.venceEn) {
+      return guardado.valor;
+    }
+    const valor = await this.consultarContextoYConteo(empresaId);
+    // Solo se reutiliza cuando ya hay 100 reportes previos (el tope de la consulta): a partir de ahí
+    // el conteo no cambia y el modo de revisión completa queda decidido. Evita volver a descargar
+    // 100 reportes en cada subida; a cambio, una corrección hecha en los últimos 2 minutos tarda
+    // hasta 2 minutos en llegar al contexto de la IA.
+    this.contextoGuardado =
+      valor.totalReportesPrevios >= REPORTES_PARA_CONTEXTO
+        ? { empresaId, valor, venceEn: Date.now() + VIGENCIA_CONTEXTO_MS }
+        : null;
+    return valor;
+  }
+
+  private async consultarContextoYConteo(
+    empresaId: string,
+  ): Promise<{ contexto: ContextoAprendizaje; totalReportesPrevios: number }> {
     let filasReportes: any[] = [];
     let filasDataset: any[] = [];
 
@@ -573,7 +601,7 @@ export class EscaneosService {
       const ordenada = typeof consulta.order === 'function'
         ? consulta.order('actualizado_en', { ascending: false })
         : consulta;
-      const limitada = typeof ordenada.limit === 'function' ? ordenada.limit(100) : ordenada;
+      const limitada = typeof ordenada.limit === 'function' ? ordenada.limit(REPORTES_PARA_CONTEXTO) : ordenada;
       const res = await limitada;
       if (Array.isArray(res?.data)) {
         filasReportes = res.data;

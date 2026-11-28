@@ -603,7 +603,7 @@ describe('ReportesService', () => {
       });
       filas = [deDavid, deValentino];
 
-      const listaDavid = await service.listar(100, {
+      const listaDavid = await service.listar({
         id: 'u-david',
         nombre: 'David',
         rol: 'ingestor',

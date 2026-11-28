@@ -14,6 +14,7 @@ import { esRolAdmin, normalizarRol } from '../auth/permisos';
 import { RptechService } from '../rptech/rptech.service';
 import { SupabaseService } from '../common/supabase.service';
 import { leerPaginado } from '../common/leer-paginado';
+import { CacheReportes } from './cache-reportes';
 import { EventosGateway } from '../realtime/eventos.gateway';
 import { IDS_CAMPOS_FORMULARIO } from '../escaneos/campos-formulario';
 import { EMPRESA_POR_DEFECTO } from '../escaneos/escaneos.service';
@@ -85,6 +86,8 @@ export class ReportesService {
     @Optional() private readonly rptech?: RptechService,
     // Registro inmutable de eventos, métricas y doble revisión (Sprint 4 Entrega 2)
     @Optional() private readonly tablero?: TableroService,
+    // Copia en memoria de la lista para no descargarla entera de Supabase en cada refresco
+    @Optional() private readonly cache?: CacheReportes,
   ) { }
 
   configurarSelectorDobleRevision(selector: () => number): void {
@@ -95,23 +98,31 @@ export class ReportesService {
     return this.supabase.getClient();
   }
 
+  /** Todos los reportes, del más nuevo al más antiguo: desde la copia en memoria si existe. */
+  private async leerTodosDesc(): Promise<FilaReporte[]> {
+    if (this.cache) return this.cache.listar();
+    const { data, error } = await leerPaginado<FilaReporte>(() =>
+      this.client
+        .from('reportes')
+        .select(SELECCION)
+        .eq('empresa_id', EMPRESA_POR_DEFECTO)
+        .order('creado_en', { ascending: false })
+        .order('id', { ascending: true }),
+    );
+    if (error) throw new Error(error.message);
+    return data;
+  }
+
   async listar(
-    limite = 1000,
     usuario?: { id?: string; nombre?: string; email?: string; rol?: string; roles?: string[]; permisos?: string[] },
   ) {
-    const { data, error } = await this.client
-      .from('reportes')
-      .select(SELECCION)
-      .eq('empresa_id', EMPRESA_POR_DEFECTO)
-      .order('creado_en', { ascending: false })
-      .limit(limite);
-
-    if (error) {
-      this.logger.error(`No se pudieron listar los reportes: ${error.message}`);
+    let filas: FilaReporte[];
+    try {
+      filas = await this.leerTodosDesc();
+    } catch (e) {
+      this.logger.error(`No se pudieron listar los reportes: ${(e as Error).message}`);
       throw new InternalServerErrorException('No se pudieron cargar los reportes.');
     }
-
-    let filas = (data as FilaReporte[]) ?? [];
 
     // SIREP-S4-T02: Si el usuario es únicamente ingestor (sube PDF y no es revisor ni administrador),
     // solo ve el estado de lo que él subió.
@@ -231,20 +242,14 @@ export class ReportesService {
     usuario: { id: string; nombre: string },
     ahoraMs = Date.now(),
   ): Promise<{ reporte: any | null }> {
-    const { data, error } = await leerPaginado(() =>
-      this.client
-        .from('reportes')
-        .select(SELECCION)
-        .eq('empresa_id', EMPRESA_POR_DEFECTO)
-        .order('creado_en', { ascending: true })
-        .order('id', { ascending: true }),
-    );
-
-    if (error) {
+    let filas: FilaReporte[];
+    try {
+      // Del más antiguo al más nuevo, como antes: si hubiera dos reservas activas, gana la más antigua.
+      filas = [...(await this.leerTodosDesc())].reverse();
+    } catch {
       throw new InternalServerErrorException('No se pudo consultar la reserva actual.');
     }
 
-    const filas = (Array.isArray(data) ? data : []) as FilaReporte[];
     const mia = filas.find((f) => reservaActiva(f, ahoraMs) && this.esDuenoDeReserva(f, usuario));
     if (!mia) return { reporte: null };
     return { reporte: await this.obtener(numeroVisible(mia)) };
@@ -1209,21 +1214,13 @@ export class ReportesService {
     totalReportes: number;
     columnas: string[];
   }> {
-    const { data, error } = await leerPaginado(() =>
-      this.client
-        .from('reportes')
-        .select(SELECCION)
-        .eq('empresa_id', EMPRESA_POR_DEFECTO)
-        .order('creado_en', { ascending: false })
-        .order('id', { ascending: true }),
-    );
-
-    if (error) {
-      this.logger.error(`No se pudieron exportar los reportes: ${error.message}`);
+    let filas: FilaReporteExportable[];
+    try {
+      filas = (await this.leerTodosDesc()) as FilaReporteExportable[];
+    } catch (e) {
+      this.logger.error(`No se pudieron exportar los reportes: ${(e as Error).message}`);
       throw new InternalServerErrorException('No se pudieron exportar los reportes.');
     }
-
-    const filas = (Array.isArray(data) ? data : []) as FilaReporteExportable[];
     const fechaHoy = new Date().toISOString().slice(0, 10);
     const columnas = COLUMNAS_EXPORTACION_RPTECH.map((c) => c.columna);
 

@@ -37,7 +37,7 @@ export class ReportesController {
   @RequierePermiso('ver_reportes')
   @Get()
   listar(@Req() req?: any) {
-    return this.reportes.listar(1000, req?.usuario);
+    return this.reportes.listar(req?.usuario);
   }
 
   /**
